@@ -1,5 +1,5 @@
 """
-每日股市資金流向報告：透過 Discord Webhook 發送外資 / 投信買賣超排行。
+每日股市資金流向報告：透過 Discord Webhook 發送外資 / 投信買賣超 + 法人積極資金族群。
 
 用法：
   export DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
@@ -21,7 +21,11 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from message_formatter import build_foreign_payload, build_trust_payload
+from message_formatter import (
+    build_foreign_payload,
+    build_institutional_active_payload,
+    build_trust_payload,
+)
 
 load_dotenv()
 
@@ -31,10 +35,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Webhook 訊息的顯示名稱與頭像（可在 .env 中自訂）
+WEBHOOK_USERNAME   = os.getenv("WEBHOOK_USERNAME",   "台股法人雷達 📡")
+WEBHOOK_AVATAR_URL = os.getenv("WEBHOOK_AVATAR_URL", "").strip()
+
+
+def _wrap_identity(payload: dict[str, Any]) -> dict[str, Any]:
+    """將自訂名稱與頭像注入 payload。"""
+    payload["username"] = WEBHOOK_USERNAME
+    if WEBHOOK_AVATAR_URL:
+        payload["avatar_url"] = WEBHOOK_AVATAR_URL
+    return payload
+
 
 def post_to_webhook(webhook_url: str, payload: dict[str, Any]) -> None:
     """將 payload 以 POST 送至 Discord Webhook。"""
-    data = json.dumps(payload).encode("utf-8")
+    data = json.dumps(_wrap_identity(payload)).encode("utf-8")
     req = urllib.request.Request(
         webhook_url,
         data=data,
@@ -70,9 +86,11 @@ def main() -> None:
         tasks.append(("外資", build_foreign_payload))
     if report_type in ("all", "trust"):
         tasks.append(("投信", build_trust_payload))
+    if report_type in ("all", "active"):
+        tasks.append(("法人積極資金族群", build_institutional_active_payload))
 
     for label, build_fn in tasks:
-        logger.info("抓取%s買賣超資料...", label)
+        logger.info("抓取%s資料...", label)
         try:
             payload = build_fn()
             post_to_webhook(webhook_url, payload)

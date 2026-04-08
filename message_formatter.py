@@ -3,11 +3,17 @@ Discord Webhook 訊息格式化：將 foreign_scraper 的資料轉成 Webhook Em
 """
 from __future__ import annotations
 
-from foreign_scraper import fetch_foreign_rank, fetch_ma_data, fetch_trust_rank
+from foreign_scraper import (
+    fetch_foreign_rank,
+    fetch_institutional_active,
+    fetch_ma_data,
+    fetch_trust_rank,
+)
 
 # Discord embed 顏色（十進位）
-COLOR_BLUE = 0x3498DB   # 外資
-COLOR_GOLD = 0xF1C40F   # 投信
+COLOR_BLUE  = 0x3498DB   # 外資
+COLOR_GOLD  = 0xF1C40F   # 投信
+COLOR_GREEN = 0x2ECC71   # 法人積極資金族群
 
 
 def _ma_tag(info: dict | None) -> str:
@@ -120,3 +126,48 @@ def build_trust_payload() -> dict:
         tpex_sell=rank["tpex"]["sell"],
         ma_data=ma_data,
     )
+
+
+def build_institutional_active_payload() -> dict:
+    """
+    法人積極資金族群：外資＋投信同日雙買超。
+    回傳 Discord Webhook payload。
+    """
+    data = fetch_institutional_active()
+    stocks = data["stocks"]
+    ma_data = fetch_ma_data(stocks) if stocks else {}
+
+    if stocks:
+        lines = []
+        for i, s in enumerate(stocks, 1):
+            code   = s["code"]
+            info   = ma_data.get(code)
+            price_str = f"  ${info['price']}" if info and info.get("price") else ""
+            ma     = _ma_tag(info)
+            lines.append(
+                f"`{i:>2}.` **{s['name']}** ({code}) [{s['market']}]  "
+                f"`合計 +{s['total_net_k']:,} 張`  "
+                f"外資 +{s['foreign_net_k']:,} / 投信 +{s['trust_net_k']:,}"
+                f"{price_str}{ma}"
+            )
+        field_value = "\n".join(lines)
+    else:
+        field_value = "（今日無外資投信同步買超個股）"
+
+    embed = {
+        "title": "🏦 法人積極資金族群",
+        "description": (
+            f"資料日期：{data.get('date', '—')}\n"
+            f"外資＋投信同日雙買超，按合計買超張數排序（Top {len(stocks)}）"
+        ),
+        "color": COLOR_GREEN,
+        "fields": [
+            {
+                "name": "📈 外資＋投信同步加碼",
+                "value": field_value,
+                "inline": False,
+            }
+        ],
+        "footer": {"text": "資料來源：TWSE / TPEx  |  MA 技術資料：Yahoo Finance"},
+    }
+    return {"embeds": [embed]}

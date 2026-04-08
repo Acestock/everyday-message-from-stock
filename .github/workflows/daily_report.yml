@@ -17,6 +17,7 @@ on:
           - all
           - foreign
           - trust
+          - active
 
 jobs:
   send-report:
