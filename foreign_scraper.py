@@ -21,6 +21,8 @@ from typing import Optional
 import pandas as pd
 import yfinance as yf
 
+from sector_themes import THEME_MAP
+
 logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
@@ -458,7 +460,8 @@ def fetch_sector_institutional() -> dict:
 
     def _agg(stocks: list[dict], key: str) -> None:
         for s in stocks:
-            sec = industry_map.get(s["code"], "其他")
+            # THEME_MAP 優先，次則 TWSE/TPEx 官方分類，最後 fallback 為「其他」
+            sec = THEME_MAP.get(s["code"]) or industry_map.get(s["code"], "其他")
             if sec not in sectors:
                 sectors[sec] = {"foreign_net": 0, "trust_net": 0}
             sectors[sec][key] += s["net_k"]
