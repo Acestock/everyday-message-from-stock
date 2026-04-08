@@ -38,7 +38,10 @@ def post_to_webhook(webhook_url: str, payload: dict[str, Any]) -> None:
     req = urllib.request.Request(
         webhook_url,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "DiscordBot (https://github.com/acestock/everyday-message-from-stock, 1.0)",
+        },
         method="POST",
     )
     try:
