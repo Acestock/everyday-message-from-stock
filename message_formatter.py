@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from foreign_scraper import (
     fetch_foreign_rank,
-    fetch_institutional_active,
     fetch_ma_data,
+    fetch_sector_institutional,
     fetch_trust_rank,
 )
 
@@ -23,8 +23,6 @@ _FOOTER = {"text": "資料來源：TWSE / TPEx  |  MA：Yahoo Finance"}
 
 # 每個 field value 最大字元（Discord 限制 1024，保留緩衝）
 _FIELD_CHAR_LIMIT = 900
-# 法人積極族群每個 field 最多幾筆
-_ACTIVE_PER_FIELD = 10
 
 
 # ── MA 標籤（手機友善：短格式）──────────────────────────────────────────────
@@ -59,28 +57,6 @@ def _rank_lines(stocks: list[dict], ma_data: dict) -> str:
         price = f" ${info['price']}" if info and info.get("price") else ""
         ma    = _ma_tag(info)
         lines.append(f"{i:>2}. {s['name']}({code}) {sign}{net:,}張{price}{ma}")
-    return "\n".join(lines)
-
-
-# ── 法人積極族群格式（每行 ≈ 55 字，10 行/field）──────────────────────────
-
-def _active_lines(stocks: list[dict], ma_data: dict, offset: int = 0) -> str:
-    if not stocks:
-        return "（今日無外資投信同步買超個股）"
-    lines = []
-    for i, s in enumerate(stocks, offset + 1):
-        code  = s["code"]
-        info  = ma_data.get(code)
-        price = f" ${info['price']}" if info and info.get("price") else ""
-        ma    = _ma_tag(info)
-        f_net = s["foreign_net_k"]
-        t_net = s["trust_net_k"]
-        total = s["total_net_k"]
-        mkt   = "市" if s["market"] == "上市" else "櫃"
-        lines.append(
-            f"{i:>2}. {s['name']}({code})[{mkt}] "
-            f"+{total:,}張 外+{f_net:,}/信+{t_net:,}{price}{ma}"
-        )
     return "\n".join(lines)
 
 
@@ -144,35 +120,45 @@ def build_trust_payload() -> dict:
     )
 
 
-def build_institutional_active_payload() -> dict:
+def build_sector_payload() -> dict:
     """
-    法人積極資金族群：外資＋投信同日雙買超。
-    每 _ACTIVE_PER_FIELD 筆一個 field，確保每個 field ≤ 1024 字元。
+    法人資金族群彙計：外資＋投信買賣超依產業類別加總。
+    顯示買超 / 賣超前 TOP_SECTOR 個產業，每行 ≈ 45 字，遠低於 1024 字元限制。
     """
-    data   = fetch_institutional_active()
-    stocks = data["stocks"]          # 最多 TOP_ACTIVE 筆
-    ma_data = fetch_ma_data(stocks) if stocks else {}
+    data = fetch_sector_institutional()
 
-    # 分批切成多個 fields
+    def _sector_lines(rows: list[dict]) -> str:
+        if not rows:
+            return "（無資料）"
+        lines = []
+        for i, r in enumerate(rows, 1):
+            total = r["total_net"]
+            sign  = "+" if total > 0 else ""
+            lines.append(
+                f"{i:>2}. {r['sector']}  {sign}{total:,}張"
+                f"  (外{r['foreign_net']:+,}/信{r['trust_net']:+,})"
+            )
+        return "\n".join(lines)
+
     fields = []
-    for start in range(0, max(len(stocks), 1), _ACTIVE_PER_FIELD):
-        chunk = stocks[start:start + _ACTIVE_PER_FIELD]
-        end   = start + len(chunk)
-        name  = (f"📈 Top {start + 1}–{end}"
-                 if len(stocks) > _ACTIVE_PER_FIELD else "📈 外資＋投信同步加碼")
-        value = _active_lines(chunk, ma_data, offset=start)
-        fields.append({"name": name, "value": value, "inline": False})
+    if data["buy"]:
+        fields.append({
+            "name":   "📈 法人合計買超族群",
+            "value":  _sector_lines(data["buy"]),
+            "inline": False,
+        })
+    if data["sell"]:
+        fields.append({
+            "name":   "📉 法人合計賣超族群",
+            "value":  _sector_lines(data["sell"]),
+            "inline": False,
+        })
 
-    total = len(stocks)
     embed = {
-        "title":       "🏦 法人積極資金族群",
-        "description": (
-            f"資料日期：{data.get('date', '—')}\n"
-            f"外資＋投信同日雙買超，按合計買超張數排序"
-            + (f"（共 {total} 支）" if total else "")
-        ),
-        "color":  COLOR_GREEN,
-        "fields": fields,
-        "footer": _FOOTER,
+        "title":       "🏭 法人資金族群彙計",
+        "description": f"資料日期：{data.get('date', '—')}\n外資＋投信買賣超按產業加總",
+        "color":       COLOR_GREEN,
+        "fields":      fields or [{"name": "—", "value": "（今日無資料）", "inline": False}],
+        "footer":      _FOOTER,
     }
     return {"embeds": [embed]}

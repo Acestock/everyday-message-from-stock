@@ -29,8 +29,12 @@ _lock = threading.Lock()
 _all_raw_cache: Optional[dict] = None
 _all_raw_cache_date: Optional[str] = None
 
-TOP_N   = 10
-TOP_ACTIVE = 20   # 法人積極資金族群顯示筆數
+# 產業類別 mapping 快取
+_industry_map: dict[str, str] = {}
+_industry_map_date: Optional[str] = None
+
+TOP_N        = 10
+TOP_SECTOR   = 10   # 族群買超/賣超顯示前 N 個產業
 TIMEOUT = 12
 
 _UA = (
@@ -380,6 +384,106 @@ def _build_rank(all_stocks: list[dict], data_date: str) -> dict:
 
 
 # ── 公開 API ───────────────────────────────────────────────────────────────────
+
+def _fetch_industry_map() -> dict[str, str]:
+    """
+    從 TWSE / TPEx Open API 抓取 股票代號 → 產業類別 mapping（每日快取）。
+    抓取失敗時回傳空 dict，呼叫端應以「其他」作 fallback。
+    """
+    global _industry_map, _industry_map_date
+
+    today = date.today().strftime("%Y-%m-%d")
+    with _lock:
+        if _industry_map_date == today and _industry_map:
+            return _industry_map
+
+    mapping: dict[str, str] = {}
+
+    # TWSE 上市 Open API（t187ap03_L）
+    # 欄位：公司代號, 公司名稱, 產業類別, ...
+    for url in [
+        "https://openapi.twse.com.tw/v1/opendata/t187ap03_L",
+    ]:
+        try:
+            j = _get_json(url)
+            if isinstance(j, list):
+                for item in j:
+                    code     = str(item.get("公司代號", "")).strip()
+                    industry = str(item.get("產業類別", "")).strip()
+                    if code and industry:
+                        mapping[code] = industry
+            if mapping:
+                break
+        except Exception as e:
+            logger.warning("[industry_map] TWSE open API 失敗: %s", e)
+
+    # TPEx 上櫃 Open API（t187ap04_L）
+    for url in [
+        "https://openapi.twse.com.tw/v1/opendata/t187ap04_L",
+    ]:
+        try:
+            j = _get_json(url)
+            if isinstance(j, list):
+                for item in j:
+                    code     = str(item.get("公司代號", "")).strip()
+                    industry = str(item.get("產業類別", "")).strip()
+                    if code and industry:
+                        mapping[code] = industry
+        except Exception as e:
+            logger.warning("[industry_map] TPEx open API 失敗: %s", e)
+
+    with _lock:
+        _industry_map      = mapping
+        _industry_map_date = today
+
+    logger.info("[industry_map] 共 %d 支股票產業資料", len(mapping))
+    return mapping
+
+
+def fetch_sector_institutional() -> dict:
+    """
+    法人資金族群彙計：將外資＋投信買賣超依產業類別加總，
+    回傳買超 / 賣超前 TOP_SECTOR 個產業。
+    回傳格式：
+    {
+      "date": str,
+      "buy":  [{sector, foreign_net, trust_net, total_net}, ...],
+      "sell": [{sector, foreign_net, trust_net, total_net}, ...],
+    }
+    """
+    raw          = _fetch_all_raw()
+    industry_map = _fetch_industry_map()
+
+    sectors: dict[str, dict[str, int]] = {}
+
+    def _agg(stocks: list[dict], key: str) -> None:
+        for s in stocks:
+            sec = industry_map.get(s["code"], "其他")
+            if sec not in sectors:
+                sectors[sec] = {"foreign_net": 0, "trust_net": 0}
+            sectors[sec][key] += s["net_k"]
+
+    _agg(raw["twse_foreign"] + raw["tpex_foreign"], "foreign_net")
+    _agg(raw["twse_trust"]   + raw["tpex_trust"],   "trust_net")
+
+    rows = [
+        {
+            "sector":      sec,
+            "foreign_net": v["foreign_net"],
+            "trust_net":   v["trust_net"],
+            "total_net":   v["foreign_net"] + v["trust_net"],
+        }
+        for sec, v in sectors.items()
+    ]
+
+    buy  = sorted([r for r in rows if r["total_net"] > 0],
+                  key=lambda x: x["total_net"], reverse=True)[:TOP_SECTOR]
+    sell = sorted([r for r in rows if r["total_net"] < 0],
+                  key=lambda x: x["total_net"])[:TOP_SECTOR]
+
+    logger.info("[sector] 買超族群 %d 個，賣超族群 %d 個", len(buy), len(sell))
+    return {"date": raw["date"], "buy": buy, "sell": sell}
+
 
 def fetch_foreign_rank() -> dict:
     """外資買賣超排行（上市 + 上櫃 Top 10）。"""

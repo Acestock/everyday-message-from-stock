@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 
 from message_formatter import (
     build_foreign_payload,
-    build_institutional_active_payload,
+    build_sector_payload,
     build_trust_payload,
 )
 
@@ -87,7 +87,7 @@ def main() -> None:
     if report_type in ("all", "trust"):
         tasks.append(("投信", build_trust_payload))
     if report_type in ("all", "active"):
-        tasks.append(("法人積極資金族群", build_institutional_active_payload))
+        tasks.append(("法人資金族群彙計", build_sector_payload))
 
     for label, build_fn in tasks:
         logger.info("抓取%s資料...", label)

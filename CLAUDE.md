@@ -44,15 +44,28 @@ send_report.py         主程式：呼叫 formatter → POST 到 Webhook
 ## 資料流
 
 ```
-_fetch_all_raw()           ← 每日快取一次，三份報告共用
+_fetch_all_raw()             ← 每日快取一次，所有報告共用
   ├── _fetch_twse_base("foreign")
   ├── _fetch_twse_base("trust")
   └── _fetch_tpex_3insti()
 
-fetch_foreign_rank()       ← 上市+上櫃外資 Top10 買/賣超
-fetch_trust_rank()         ← 上市+上櫃投信 Top10 買/賣超
-fetch_institutional_active() ← 外資＋投信同日雙買超（取交集）
+_fetch_industry_map()        ← 股票代號→產業類別 mapping（每日快取）
+  ├── openapi.twse.com.tw/v1/opendata/t187ap03_L  (上市)
+  └── openapi.twse.com.tw/v1/opendata/t187ap04_L  (上櫃)
+
+fetch_foreign_rank()         ← 上市+上櫃外資 Top10 買/賣超
+fetch_trust_rank()           ← 上市+上櫃投信 Top10 買/賣超
+fetch_sector_institutional() ← 外資＋投信買賣超依產業彙計（族群視角）
 ```
+
+## 族群彙計設計原則
+
+- **顯示產業，不顯示個股**：用戶要的是資金流向哪個族群，不是個股清單
+- 以 TWSE/TPEx Open API 取得 stock→產業類別 mapping，抓不到時 fallback 為「其他」
+- 買超族群 Top 10 + 賣超族群 Top 10，每行格式：
+  ```
+   1. 半導體業  +62,234張  (外+50,234/信+12,000)
+  ```
 
 ---
 
