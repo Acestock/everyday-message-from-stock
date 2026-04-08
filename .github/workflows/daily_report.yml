@@ -1,0 +1,43 @@
+name: Daily Stock Report
+
+on:
+  # 每週一至五 16:30 台灣時間（= UTC 08:30）自動執行
+  schedule:
+    - cron: '30 8 * * 1-5'
+
+  # 手動觸發（可在 GitHub Actions 頁面按 "Run workflow"）
+  workflow_dispatch:
+    inputs:
+      report_type:
+        description: '要發送的報告類型'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - foreign
+          - trust
+
+jobs:
+  send-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Send stock report
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          REPORT_TYPE: ${{ inputs.report_type || 'all' }}
+        run: python send_report.py

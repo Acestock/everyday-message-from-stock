@@ -1,15 +1,16 @@
 """
-Discord 訊息格式化：將 foreign_scraper 的資料轉成 Discord Embed。
+Discord Webhook 訊息格式化：將 foreign_scraper 的資料轉成 Webhook Embed payload。
 """
 from __future__ import annotations
 
-import discord
-
 from foreign_scraper import fetch_foreign_rank, fetch_ma_data, fetch_trust_rank
 
-# MA 技術分析標籤
+# Discord embed 顏色（十進位）
+COLOR_BLUE = 0x3498DB   # 外資
+COLOR_GOLD = 0xF1C40F   # 投信
+
+
 def _ma_tag(info: dict | None) -> str:
-    """回傳簡短的 MA 狀態字串，例如 '↑MA20 ↑MA60' 或 '↓MA20'。"""
     if not info:
         return ""
     parts = []
@@ -25,7 +26,6 @@ def _ma_tag(info: dict | None) -> str:
 
 
 def _rank_lines(stocks: list[dict], ma_data: dict) -> str:
-    """將排名清單轉成多行文字（用於 Embed field value）。"""
     if not stocks:
         return "（無資料）"
     lines = []
@@ -33,11 +33,9 @@ def _rank_lines(stocks: list[dict], ma_data: dict) -> str:
         code = s["code"]
         net  = s["net_k"]
         sign = "+" if net > 0 else ""
-        ma   = _ma_tag(ma_data.get(code))
-        price_str = ""
         info = ma_data.get(code)
-        if info and info.get("price"):
-            price_str = f"  ${info['price']}"
+        price_str = f"  ${info['price']}" if info and info.get("price") else ""
+        ma = _ma_tag(info)
         lines.append(
             f"`{i:>2}.` **{s['name']}** ({code})  "
             f"`{sign}{net:,} 張`{price_str}{ma}"
@@ -45,69 +43,56 @@ def _rank_lines(stocks: list[dict], ma_data: dict) -> str:
     return "\n".join(lines)
 
 
-def _build_embed(
+def _build_payload(
     title: str,
-    color: discord.Color,
+    color: int,
     data_date: str,
     twse_buy: list[dict],
     twse_sell: list[dict],
     tpex_buy: list[dict],
     tpex_sell: list[dict],
     ma_data: dict,
-) -> discord.Embed:
-    embed = discord.Embed(
-        title=title,
-        description=f"資料日期：{data_date}",
-        color=color,
-    )
-
-    # 上市
+) -> dict:
+    """回傳 Discord Webhook 的 JSON payload（含單一 embed）。"""
+    fields = []
     if twse_buy:
-        embed.add_field(
-            name="🟢 上市買超 Top 10",
-            value=_rank_lines(twse_buy, ma_data),
-            inline=False,
-        )
+        fields.append({"name": "🟢 上市買超 Top 10",
+                        "value": _rank_lines(twse_buy,  ma_data), "inline": False})
     if twse_sell:
-        embed.add_field(
-            name="🔴 上市賣超 Top 10",
-            value=_rank_lines(twse_sell, ma_data),
-            inline=False,
-        )
-
-    # 上櫃
+        fields.append({"name": "🔴 上市賣超 Top 10",
+                        "value": _rank_lines(twse_sell, ma_data), "inline": False})
     if tpex_buy:
-        embed.add_field(
-            name="🟢 上櫃買超 Top 10",
-            value=_rank_lines(tpex_buy, ma_data),
-            inline=False,
-        )
+        fields.append({"name": "🟢 上櫃買超 Top 10",
+                        "value": _rank_lines(tpex_buy,  ma_data), "inline": False})
     if tpex_sell:
-        embed.add_field(
-            name="🔴 上櫃賣超 Top 10",
-            value=_rank_lines(tpex_sell, ma_data),
-            inline=False,
-        )
+        fields.append({"name": "🔴 上櫃賣超 Top 10",
+                        "value": _rank_lines(tpex_sell, ma_data), "inline": False})
 
-    if not any([twse_buy, twse_sell, tpex_buy, tpex_sell]):
-        embed.description = f"資料日期：{data_date}\n\n（今日無資料，可能為非交易日）"
+    description = f"資料日期：{data_date}"
+    if not fields:
+        description += "\n\n（今日無資料，可能為非交易日）"
 
-    embed.set_footer(text="資料來源：TWSE / TPEx  |  MA 技術資料：Yahoo Finance")
-    return embed
+    embed = {
+        "title": title,
+        "description": description,
+        "color": color,
+        "fields": fields,
+        "footer": {"text": "資料來源：TWSE / TPEx  |  MA 技術資料：Yahoo Finance"},
+    }
+    return {"embeds": [embed]}
 
 
-def build_foreign_embed() -> discord.Embed:
-    """抓取外資買賣超，回傳格式化的 Discord Embed。"""
+def build_foreign_payload() -> dict:
+    """抓取外資買賣超，回傳 Discord Webhook payload。"""
     rank = fetch_foreign_rank()
     all_stocks = (
         rank["twse"]["buy"] + rank["twse"]["sell"]
         + rank["tpex"]["buy"] + rank["tpex"]["sell"]
     )
-    ma_data = fetch_ma_data([s for s in all_stocks]) if all_stocks else {}
-
-    return _build_embed(
+    ma_data = fetch_ma_data(all_stocks) if all_stocks else {}
+    return _build_payload(
         title="📊 外資買賣超排行",
-        color=discord.Color.blue(),
+        color=COLOR_BLUE,
         data_date=rank.get("date", "—"),
         twse_buy=rank["twse"]["buy"],
         twse_sell=rank["twse"]["sell"],
@@ -117,18 +102,17 @@ def build_foreign_embed() -> discord.Embed:
     )
 
 
-def build_trust_embed() -> discord.Embed:
-    """抓取投信買賣超，回傳格式化的 Discord Embed。"""
+def build_trust_payload() -> dict:
+    """抓取投信買賣超，回傳 Discord Webhook payload。"""
     rank = fetch_trust_rank()
     all_stocks = (
         rank["twse"]["buy"] + rank["twse"]["sell"]
         + rank["tpex"]["buy"] + rank["tpex"]["sell"]
     )
-    ma_data = fetch_ma_data([s for s in all_stocks]) if all_stocks else {}
-
-    return _build_embed(
+    ma_data = fetch_ma_data(all_stocks) if all_stocks else {}
+    return _build_payload(
         title="📊 投信買賣超排行",
-        color=discord.Color.gold(),
+        color=COLOR_GOLD,
         data_date=rank.get("date", "—"),
         twse_buy=rank["twse"]["buy"],
         twse_sell=rank["twse"]["sell"],
