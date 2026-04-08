@@ -41,11 +41,16 @@ def post_to_webhook(webhook_url: str, payload: dict[str, Any]) -> None:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        status = resp.status
-        if status not in (200, 204):
-            raise RuntimeError(f"Webhook 回應非預期狀態碼: {status}")
-    logger.info("Webhook 發送成功（HTTP %s）", status)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            status = resp.status
+            if status not in (200, 204):
+                raise RuntimeError(f"Webhook 回應非預期狀態碼: {status}")
+        logger.info("Webhook 發送成功（HTTP %s）", status)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        logger.error("Discord 回應 HTTP %s: %s", e.code, body)
+        raise
 
 
 def main() -> None:
