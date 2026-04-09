@@ -64,7 +64,8 @@ def _rank_lines(stocks: list[dict], ma_data: dict) -> str:
         info  = ma_data.get(code)
         price = f" ${info['price']}" if info and info.get("price") else ""
         ma    = _ma_tag(info)
-        lines.append(f"{i:>2}. {s['name']}({code}) {_fmt_k(s['net_k'])}張{price}{ma}")
+        # 股名(代號) 粗體，讓眼睛快速定位
+        lines.append(f"{i:>2}. **{s['name']}({code})** {_fmt_k(s['net_k'])}張{price}{ma}")
     return "\n".join(lines)
 
 
@@ -140,12 +141,12 @@ def build_sector_payload() -> dict:
             return "（無資料）"
         lines = []
         for i, r in enumerate(rows, 1):
-            top   = r.get("top_stock")
-            leader = f"  ▷{top['name']}{_fmt_k(top['net_k'])}張" if top else ""
+            top    = r.get("top_stock")
+            leader = f"  ▷**{top['name']}** {_fmt_k(top['net_k'])}張" if top else ""
+            # 兩行格式：第一行族群名+總量，第二行外/信分拆+領頭股
             lines.append(
-                f"{i:>2}. {r['sector']}  {_fmt_k(r['total_net'])}張"
-                f"  外{_fmt_k(r['foreign_net'])}/信{_fmt_k(r['trust_net'])}"
-                f"{leader}"
+                f"{i:>2}. **{r['sector']}** {_fmt_k(r['total_net'])}張\n"
+                f"    外{_fmt_k(r['foreign_net'])}/信{_fmt_k(r['trust_net'])}{leader}"
             )
         return "\n".join(lines)
 
