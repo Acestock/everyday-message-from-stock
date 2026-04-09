@@ -366,10 +366,19 @@ def fetch_ma_data(
     return result
 
 
+# ── ETF 判斷 ─────────────────────────────────────────────────────────────────
+
+def _is_etf(code: str) -> bool:
+    """台股 ETF 代號均以 '0' 開頭；普通股從 1xxx 起，不會以 0 開頭。"""
+    return code.startswith("0")
+
+
 # ── 共用排名邏輯 ──────────────────────────────────────────────────────────────
 
 def _build_rank(all_stocks: list[dict], data_date: str) -> dict:
     def _split(stocks: list[dict]) -> dict:
+        # 過濾 ETF
+        stocks = [s for s in stocks if not _is_etf(s["code"])]
         buy  = sorted(
             [s for s in stocks if s["net_k"] > 0],
             key=lambda x: x["net_k"], reverse=True,
@@ -500,6 +509,137 @@ def fetch_sector_institutional() -> dict:
 
     logger.info("[sector] 買超族群 %d 個，賣超族群 %d 個", len(buy), len(sell))
     return {"date": raw["date"], "buy": buy, "sell": sell}
+
+
+# ── 大盤總覽 ──────────────────────────────────────────────────────────────────
+
+def _fetch_taiex_index() -> dict | None:
+    """加權指數收盤、漲跌、漲跌幅（yfinance ^TWII，fallback TWSE MI_INDEX）。"""
+    # Method 1: yfinance
+    try:
+        df = yf.download("^TWII", period="5d", progress=False, auto_adjust=False)
+        if df is not None and len(df) >= 2:
+            close = float(df["Close"].iloc[-1])
+            prev  = float(df["Close"].iloc[-2])
+            chg   = close - prev
+            pct   = chg / prev * 100
+            return {"close": round(close, 2), "change": round(chg, 2),
+                    "change_pct": round(pct, 2)}
+    except Exception as e:
+        logger.debug("[taiex] yfinance 失敗: %s", e)
+
+    # Method 2: TWSE MI_INDEX API
+    try:
+        j = _get_json(
+            "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
+            "?response=json&type=IND"
+        )
+        if j.get("stat") == "OK":
+            for row in j.get("data9", j.get("data", [])):
+                if row and "加權" in str(row[0]):
+                    def _safe(s: str) -> float:
+                        return float(str(s).replace(",", "").replace("+", ""))
+                    close = _safe(row[1])
+                    chg   = _safe(row[2]) * (-1 if "▼" in str(row[4]) else 1)
+                    pct   = _safe(row[3]) * (-1 if "▼" in str(row[4]) else 1)
+                    return {"close": round(close, 2), "change": round(chg, 2),
+                            "change_pct": round(pct, 2)}
+    except Exception as e:
+        logger.warning("[taiex] MI_INDEX 失敗: %s", e)
+
+    return None
+
+
+def _fetch_bfi82u() -> dict | None:
+    """
+    三大法人買賣超金額（億元）。
+    來源：TWSE BFI82U（外資 / 投信 / 自營商分開列示）。
+    """
+    try:
+        j = _get_json(
+            "https://www.twse.com.tw/rwd/zh/fund/BFI82U"
+            "?response=json&dayDate=&type=day"
+        )
+        if j.get("stat") != "OK":
+            return None
+
+        fields = j.get("fields", [])
+        # 找買賣超金額欄位 index
+        net_idx = 3
+        for i, f in enumerate(fields):
+            if "買賣超" in str(f):
+                net_idx = i
+                break
+
+        result: dict[str, float] = {}
+        for row in j.get("data", []):
+            name = str(row[0]).strip()
+            try:
+                raw = float(str(row[net_idx]).replace(",", ""))
+            except (ValueError, IndexError):
+                continue
+            net_b = round(raw / 1e8, 1)   # 元 → 億
+
+            if name in ("外陸資及陸資", "外資及陸資"):
+                result["foreign"] = net_b
+            elif name == "投信":
+                result["trust"] = net_b
+            elif name == "自營商":
+                result["dealer"] = net_b
+
+        if result:
+            result["total"] = round(sum(result.values()), 1)
+            return result
+    except Exception as e:
+        logger.warning("[bfi82u] 失敗: %s", e)
+    return None
+
+
+def _fetch_futures_position() -> dict | None:
+    """
+    外資台指期貨未平倉淨多單口數。
+    來源：TAIFEX Open API 或官網 JSON。
+    """
+    urls = [
+        "https://openapi.taifex.com.tw/v1/DailyForeignInstitutionalInvestors",
+        "https://openapi.taifex.com.tw/v1/TaifexDailyForeignInstitutionalInvestors",
+    ]
+    for url in urls:
+        try:
+            j = _get_json(url)
+            if not isinstance(j, list) or not j:
+                continue
+            for item in j:
+                # 欄位名稱相容中英文
+                contract    = str(item.get("ContractName",   item.get("契約名稱",  ""))).strip()
+                institution = str(item.get("InstitutionName",item.get("身份別",    ""))).strip()
+                if "臺股期貨" not in contract and "台股期貨" not in contract:
+                    continue
+                if "外資" not in institution:
+                    continue
+                def _i(k1: str, k2: str) -> int:
+                    v = item.get(k1) or item.get(k2, 0)
+                    return int(str(v).replace(",", "") or 0)
+                long_oi  = _i("LongOpenInterest",  "多方未平倉口數")
+                short_oi = _i("ShortOpenInterest", "空方未平倉口數")
+                return {"long_oi": long_oi, "short_oi": short_oi,
+                        "net": long_oi - short_oi}
+        except Exception as e:
+            logger.debug("[futures] %s 失敗: %s", url, e)
+    logger.warning("[futures] 所有 TAIFEX 端點均失敗")
+    return None
+
+
+def fetch_market_overview() -> dict:
+    """
+    大盤總覽：加權指數 + 三大法人合計（億元）+ 外資期貨淨多單。
+    任何子項目失敗不影響其他項目，回傳 None 表示該項目無資料。
+    """
+    return {
+        "index":   _fetch_taiex_index(),
+        "insti":   _fetch_bfi82u(),
+        "futures": _fetch_futures_position(),
+    }
 
 
 def fetch_foreign_rank() -> dict:

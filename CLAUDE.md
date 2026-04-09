@@ -53,8 +53,9 @@ _fetch_industry_map()        ← 股票代號→產業類別 mapping（每日快
   ├── openapi.twse.com.tw/v1/opendata/t187ap03_L  (上市)
   └── openapi.twse.com.tw/v1/opendata/t187ap04_L  (上櫃)
 
-fetch_foreign_rank()         ← 上市+上櫃外資 Top10 買/賣超
-fetch_trust_rank()           ← 上市+上櫃投信 Top10 買/賣超
+fetch_market_overview()      ← 大盤總覽（指數 + 三大法人億元 + 外資期貨）
+fetch_foreign_rank()         ← 上市+上櫃外資 Top10 買/賣超（自動過濾 ETF）
+fetch_trust_rank()           ← 上市+上櫃投信 Top10 買/賣超（自動過濾 ETF）
 fetch_sector_institutional() ← 外資＋投信買賣超依產業彙計（族群視角）
 ```
 

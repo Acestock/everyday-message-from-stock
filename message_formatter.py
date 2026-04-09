@@ -11,6 +11,7 @@ from __future__ import annotations
 from foreign_scraper import (
     fetch_foreign_rank,
     fetch_ma_data,
+    fetch_market_overview,
     fetch_sector_institutional,
     fetch_trust_rank,
 )
@@ -104,6 +105,73 @@ def _build_payload(
 
 
 # ── 公開函式 ──────────────────────────────────────────────────────────────────
+
+def build_market_overview_payload() -> dict:
+    """大盤總覽：加權指數 + 三大法人金額 + 外資期貨。"""
+    data = fetch_market_overview()
+
+    lines: list[str] = []
+
+    # ── 加權指數 ──────────────────────────────────────────────────────────────
+    idx = data.get("index")
+    if idx:
+        arrow = "▲" if idx["change"] >= 0 else "▼"
+        sign  = "+" if idx["change"] >= 0 else ""
+        lines.append(
+            f"**加權指數** {idx['close']:,.2f}　"
+            f"{arrow} {sign}{idx['change']:,.2f} ({sign}{idx['change_pct']:.2f}%)"
+        )
+    else:
+        lines.append("**加權指數** 資料取得失敗")
+
+    lines.append("")   # 空行
+
+    # ── 三大法人金額 ───────────────────────────────────────────────────────────
+    insti = data.get("insti")
+    if insti:
+        total_sign = "+" if insti.get("total", 0) >= 0 else ""
+        lines.append(f"**三大法人合計** {total_sign}{insti.get('total', 0):.1f}億")
+
+        parts = []
+        if "foreign" in insti:
+            s = "+" if insti["foreign"] >= 0 else ""
+            parts.append(f"外資 {s}{insti['foreign']:.1f}億")
+        if "trust" in insti:
+            s = "+" if insti["trust"] >= 0 else ""
+            parts.append(f"投信 {s}{insti['trust']:.1f}億")
+        if "dealer" in insti:
+            s = "+" if insti["dealer"] >= 0 else ""
+            parts.append(f"自營 {s}{insti['dealer']:.1f}億")
+        if parts:
+            lines.append("　" + " ｜ ".join(parts))
+    else:
+        lines.append("**三大法人合計** 資料取得失敗")
+
+    lines.append("")
+
+    # ── 外資期貨 ───────────────────────────────────────────────────────────────
+    fut = data.get("futures")
+    if fut:
+        net   = fut["net"]
+        arrow = "🔵" if net >= 0 else "🔴"
+        sign  = "+" if net >= 0 else ""
+        lines.append(
+            f"**外資台指期** {arrow} 淨多單 {sign}{net:,}口"
+        )
+        lines.append(
+            f"　多方 {fut['long_oi']:,}口　空方 {fut['short_oi']:,}口"
+        )
+    else:
+        lines.append("**外資台指期** 資料取得失敗")
+
+    embed = {
+        "title":       "📈 大盤總覽",
+        "description": "\n".join(lines),
+        "color":       0x5865F2,   # Discord blurple
+        "footer":      _FOOTER,
+    }
+    return {"embeds": [embed]}
+
 
 def build_foreign_payload() -> dict:
     rank = fetch_foreign_rank()

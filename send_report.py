@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 
 from message_formatter import (
     build_foreign_payload,
+    build_market_overview_payload,
     build_sector_payload,
     build_trust_payload,
 )
@@ -82,6 +83,8 @@ def main() -> None:
     errors: list[str] = []
 
     tasks = []
+    if report_type in ("all", "overview"):
+        tasks.append(("大盤總覽", build_market_overview_payload))
     if report_type in ("all", "foreign"):
         tasks.append(("外資", build_foreign_payload))
     if report_type in ("all", "trust"):
