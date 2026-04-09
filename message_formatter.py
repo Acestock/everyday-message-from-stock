@@ -25,6 +25,16 @@ _FOOTER = {"text": "資料來源：TWSE / TPEx  |  MA：Yahoo Finance"}
 _FIELD_CHAR_LIMIT = 900
 
 
+# ── 張數 k 格式（≥1000 才換算，節省行寬）────────────────────────────────────
+
+def _fmt_k(n: int) -> str:
+    """5234 → '+5.2k'  -800 → '-800'  0 → '+0'"""
+    sign = "+" if n >= 0 else ""
+    if abs(n) >= 1000:
+        return f"{sign}{n / 1000:.1f}k"
+    return f"{sign}{n}"
+
+
 # ── MA 標籤（手機友善：短格式）──────────────────────────────────────────────
 
 def _ma_tag(info: dict | None) -> str:
@@ -51,12 +61,10 @@ def _rank_lines(stocks: list[dict], ma_data: dict) -> str:
     lines = []
     for i, s in enumerate(stocks, 1):
         code  = s["code"]
-        net   = s["net_k"]
-        sign  = "+" if net > 0 else ""
         info  = ma_data.get(code)
         price = f" ${info['price']}" if info and info.get("price") else ""
         ma    = _ma_tag(info)
-        lines.append(f"{i:>2}. {s['name']}({code}) {sign}{net:,}張{price}{ma}")
+        lines.append(f"{i:>2}. {s['name']}({code}) {_fmt_k(s['net_k'])}張{price}{ma}")
     return "\n".join(lines)
 
 
@@ -132,11 +140,12 @@ def build_sector_payload() -> dict:
             return "（無資料）"
         lines = []
         for i, r in enumerate(rows, 1):
-            total = r["total_net"]
-            sign  = "+" if total > 0 else ""
+            top   = r.get("top_stock")
+            leader = f"  ▷{top['name']}{_fmt_k(top['net_k'])}張" if top else ""
             lines.append(
-                f"{i:>2}. {r['sector']}  {sign}{total:,}張"
-                f"  (外{r['foreign_net']:+,}/信{r['trust_net']:+,})"
+                f"{i:>2}. {r['sector']}  {_fmt_k(r['total_net'])}張"
+                f"  外{_fmt_k(r['foreign_net'])}/信{_fmt_k(r['trust_net'])}"
+                f"{leader}"
             )
         return "\n".join(lines)
 

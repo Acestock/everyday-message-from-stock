@@ -449,35 +449,49 @@ def fetch_sector_institutional() -> dict:
     回傳格式：
     {
       "date": str,
-      "buy":  [{sector, foreign_net, trust_net, total_net}, ...],
-      "sell": [{sector, foreign_net, trust_net, total_net}, ...],
+      "buy":  [{sector, foreign_net, trust_net, total_net, top_stock}, ...],
+      "sell": [{sector, foreign_net, trust_net, total_net, top_stock}, ...],
     }
+    top_stock: {"code": str, "name": str, "net_k": int}
     """
     raw          = _fetch_all_raw()
     industry_map = _fetch_industry_map()
 
-    sectors: dict[str, dict[str, int]] = {}
+    # sectors[sec] = {foreign_net, trust_net, stock_nets:{code:{name,total}}}
+    sectors: dict[str, dict] = {}
 
     def _agg(stocks: list[dict], key: str) -> None:
         for s in stocks:
-            # THEME_MAP 優先，次則 TWSE/TPEx 官方分類，最後 fallback 為「其他」
             sec = THEME_MAP.get(s["code"]) or industry_map.get(s["code"], "其他")
             if sec not in sectors:
-                sectors[sec] = {"foreign_net": 0, "trust_net": 0}
+                sectors[sec] = {"foreign_net": 0, "trust_net": 0, "stock_nets": {}}
             sectors[sec][key] += s["net_k"]
+            code = s["code"]
+            if code not in sectors[sec]["stock_nets"]:
+                sectors[sec]["stock_nets"][code] = {"name": s["name"], "total": 0}
+            sectors[sec]["stock_nets"][code]["total"] += s["net_k"]
 
     _agg(raw["twse_foreign"] + raw["tpex_foreign"], "foreign_net")
     _agg(raw["twse_trust"]   + raw["tpex_trust"],   "trust_net")
 
-    rows = [
-        {
+    rows = []
+    for sec, v in sectors.items():
+        total       = v["foreign_net"] + v["trust_net"]
+        stock_nets  = v["stock_nets"]
+        if stock_nets:
+            # 取與族群同方向最大貢獻的個股
+            pick = max if total >= 0 else min
+            code, info = pick(stock_nets.items(), key=lambda x: x[1]["total"])
+            top_stock = {"code": code, "name": info["name"], "net_k": info["total"]}
+        else:
+            top_stock = None
+        rows.append({
             "sector":      sec,
             "foreign_net": v["foreign_net"],
             "trust_net":   v["trust_net"],
-            "total_net":   v["foreign_net"] + v["trust_net"],
-        }
-        for sec, v in sectors.items()
-    ]
+            "total_net":   total,
+            "top_stock":   top_stock,
+        })
 
     buy  = sorted([r for r in rows if r["total_net"] > 0],
                   key=lambda x: x["total_net"], reverse=True)[:TOP_SECTOR]
