@@ -19,23 +19,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify Discord Webhook URL
-        env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: |
-          echo "URL length: ${#DISCORD_WEBHOOK_URL}"
-          echo "URL prefix: ${DISCORD_WEBHOOK_URL:0:34}"
-          HTTP_CODE=$(curl -s -o /tmp/discord_resp.txt -w "%{http_code}" \
-            -X POST "$DISCORD_WEBHOOK_URL" \
-            -H "Content-Type: application/json" \
-            -d '{"content":"GitHub Actions 連線測試（可忽略此訊息）"}')
-          echo "Discord HTTP status: $HTTP_CODE"
-          echo "Discord response: $(cat /tmp/discord_resp.txt)"
-          if [ "$HTTP_CODE" != "204" ] && [ "$HTTP_CODE" != "200" ]; then
-            echo "::error::Webhook 驗證失敗，HTTP $HTTP_CODE"
-            exit 1
-          fi
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
