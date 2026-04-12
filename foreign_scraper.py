@@ -37,6 +37,7 @@ _industry_map_date: Optional[str] = None
 
 TOP_N        = 10
 TOP_SECTOR   = 10   # 族群買超/賣超顯示前 N 個產業
+TOP_ACTIVE   = 20   # 外資投信雙買超個股最多顯示筆數
 TIMEOUT = 12
 
 _UA = (

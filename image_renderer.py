@@ -223,11 +223,15 @@ def _overview_block(ov: dict | None) -> str:
         net  = fut["net"]
         fc   = "blu" if net >= 0 else "neg"
         sign = "+" if net >= 0 else ""
+        lo, so = fut.get("long_oi", 0), fut.get("short_oi", 0)
+        sub = (
+            f'多 {lo:,} ／ 空 {so:,}'
+            if (lo or so) else
+            f'淨多單 {sign}{net:,}'
+        )
         fut_h = (
             f'<div class="ov-val {fc}">{sign}{net:,}口</div>'
-            f'<div class="ov-sub" style="color:#57606a">'
-            f'多 {fut["long_oi"]:,} ／ 空 {fut["short_oi"]:,}'
-            f'</div>'
+            f'<div class="ov-sub" style="color:#57606a">{sub}</div>'
         )
     else:
         fut_h = '<div class="ov-val" style="color:#8c959f">—</div>'
