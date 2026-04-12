@@ -25,23 +25,22 @@ def _fmt_k(n: int | float) -> str:
 
 def _ma_html(info: dict | None) -> str:
     """
-    MA 標籤：台股慣例 紅=多頭（價格在均線上）  綠=空頭（價格在均線下）
-    回傳帶顏色 <span> 的 HTML 字串。
+    MA 位置標籤（只顯示在線上/下，不顯示均線走勢方向）。
+    台股慣例：紅=在均線上（多頭）  綠=在均線下（空頭）
+    格式：↑20 ↑60
     """
     if not info:
         return ""
     parts = []
     if info.get("ma20") is not None:
-        cls   = "pos" if info["above_ma20"] else "neg"   # 上→紅 / 下→綠
+        cls   = "pos" if info["above_ma20"] else "neg"
         arrow = "↑" if info["above_ma20"] else "↓"
-        trend = "▲" if info["ma20_up"]    else "▼"
-        parts.append(f'<span class="{cls}">{arrow}20{trend}</span>')
+        parts.append(f'<span class="{cls}">{arrow}20</span>')
     if info.get("ma60") is not None:
         cls   = "pos" if info["above_ma60"] else "neg"
         arrow = "↑" if info["above_ma60"] else "↓"
-        trend = "▲" if info["ma60_up"]    else "▼"
-        parts.append(f'<span class="{cls}">{arrow}60{trend}</span>')
-    return "".join(parts)
+        parts.append(f'<span class="{cls}">{arrow}60</span>')
+    return " ".join(parts)
 
 
 # ── CSS（淺色主題，台股紅漲綠跌）─────────────────────────────────────────────

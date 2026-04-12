@@ -621,35 +621,69 @@ def _fetch_bfi82u() -> dict | None:
 def _fetch_futures_position() -> dict | None:
     """
     外資台指期貨未平倉淨多單口數。
-    來源：TAIFEX Open API 或官網 JSON。
+    來源：TAIFEX Open API（openapi.taifex.com.tw）。
+
+    TAIFEX API 實際欄位名：
+      商品名稱  = "TX"（非 "臺股期貨"）
+      身份別    = "外資及陸資"
+      多方未平倉口數 / 空方未平倉口數 / 多空淨額未平倉口數
     """
     urls = [
         "https://openapi.taifex.com.tw/v1/DailyForeignInstitutionalInvestors",
         "https://openapi.taifex.com.tw/v1/TaifexDailyForeignInstitutionalInvestors",
     ]
+
+    def _int(item: dict, *keys: str) -> int:
+        for k in keys:
+            v = item.get(k)
+            if v is not None:
+                try:
+                    return int(str(v).replace(",", "").strip() or "0")
+                except (ValueError, TypeError):
+                    pass
+        return 0
+
     for url in urls:
         try:
             j = _get_json(url)
             if not isinstance(j, list) or not j:
+                logger.info("[futures] %s → 回傳空或非 list", url)
                 continue
+
+            logger.info("[futures] %s → %d 筆，欄位：%s",
+                        url, len(j), list(j[0].keys()))
+
+            long_total = short_total = 0
+            found = False
             for item in j:
-                # 欄位名稱相容中英文
-                contract    = str(item.get("ContractName",   item.get("契約名稱",  ""))).strip()
-                institution = str(item.get("InstitutionName",item.get("身份別",    ""))).strip()
-                if "臺股期貨" not in contract and "台股期貨" not in contract:
+                # 欄位名稱相容中英文；TAIFEX 實際使用 "商品名稱" = "TX"
+                contract = str(
+                    item.get("ContractName") or item.get("商品名稱") or
+                    item.get("契約名稱") or ""
+                ).strip()
+                institution = str(
+                    item.get("InstitutionName") or item.get("身份別") or
+                    item.get("投資人別") or ""
+                ).strip()
+
+                # TX = 台指期；也兼容中文名稱
+                if not any(k in contract for k in ("TX", "臺股", "台股")):
                     continue
                 if "外資" not in institution:
                     continue
-                def _i(k1: str, k2: str) -> int:
-                    v = item.get(k1) or item.get(k2, 0)
-                    return int(str(v).replace(",", "") or 0)
-                long_oi  = _i("LongOpenInterest",  "多方未平倉口數")
-                short_oi = _i("ShortOpenInterest", "空方未平倉口數")
-                return {"long_oi": long_oi, "short_oi": short_oi,
-                        "net": long_oi - short_oi}
+
+                long_total  += _int(item, "LongOpenInterest",  "多方未平倉口數")
+                short_total += _int(item, "ShortOpenInterest", "空方未平倉口數")
+                found = True
+
+            if found:
+                return {"long_oi": long_total, "short_oi": short_total,
+                        "net": long_total - short_total}
+
         except Exception as e:
-            logger.debug("[futures] %s 失敗: %s", url, e)
-    logger.warning("[futures] 所有 TAIFEX 端點均失敗")
+            logger.info("[futures] %s 失敗: %s", url, e)
+
+    logger.warning("[futures] 所有 TAIFEX 端點均失敗，外資台指期資料無法取得")
     return None
 
 
