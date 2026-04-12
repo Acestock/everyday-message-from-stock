@@ -266,11 +266,12 @@ def _fetch_all_raw() -> dict:
 # ── MA 技術資料 ───────────────────────────────────────────────────────────────
 
 def _download_ohlcv(tickers: list[str]) -> tuple[dict, dict]:
-    """批次下載近 3 個月收盤 + 成交量；回傳 (closes_dict, volumes_dict)。"""
+    """批次下載近 6 個月收盤 + 成交量；回傳 (closes_dict, volumes_dict)。
+    使用 6mo 而非 3mo，確保春節等長假後仍有 ≥60 個交易日供 MA60 計算。"""
     if not tickers:
         return {}, {}
     try:
-        df = yf.download(tickers, period="3mo", progress=False, auto_adjust=False)
+        df = yf.download(tickers, period="6mo", progress=False, auto_adjust=False)
         if df is None or df.empty:
             return {}, {}
         if isinstance(df.columns, pd.MultiIndex):
@@ -621,17 +622,15 @@ def _fetch_bfi82u() -> dict | None:
 def _fetch_futures_position() -> dict | None:
     """
     外資台指期貨未平倉淨多單口數。
-    來源：TAIFEX Open API（openapi.taifex.com.tw）。
+    Strategy 1：TAIFEX Open API（openapi.taifex.com.tw）。
+    Strategy 2：TAIFEX 官網 HTML 表格備援。
 
     TAIFEX API 實際欄位名：
-      商品名稱  = "TX"（非 "臺股期貨"）
-      身份別    = "外資及陸資"
-      多方未平倉口數 / 空方未平倉口數 / 多空淨額未平倉口數
+      商品名稱 = "TX"（非 "臺股期貨"）
+      身份別   = "外資及陸資"
     """
-    urls = [
-        "https://openapi.taifex.com.tw/v1/DailyForeignInstitutionalInvestors",
-        "https://openapi.taifex.com.tw/v1/TaifexDailyForeignInstitutionalInvestors",
-    ]
+    import re as _re
+    import urllib.parse
 
     def _int(item: dict, *keys: str) -> int:
         for k in keys:
@@ -643,47 +642,112 @@ def _fetch_futures_position() -> dict | None:
                     pass
         return 0
 
-    for url in urls:
+    # ── Strategy 1: TAIFEX Open API ──────────────────────────────────────────
+    for url in [
+        "https://openapi.taifex.com.tw/v1/DailyForeignInstitutionalInvestors",
+        "https://openapi.taifex.com.tw/v1/TaifexDailyForeignInstitutionalInvestors",
+    ]:
         try:
             j = _get_json(url)
+            # 兼容 dict wrapper {"data": [...]}
+            if isinstance(j, dict):
+                for wrap_key in ("data", "Data", "result", "records"):
+                    if isinstance(j.get(wrap_key), list):
+                        j = j[wrap_key]
+                        break
             if not isinstance(j, list) or not j:
-                logger.info("[futures] %s → 回傳空或非 list", url)
+                logger.info("[futures] API %s → 空或非 list", url.split("/")[-1])
                 continue
 
-            logger.info("[futures] %s → %d 筆，欄位：%s",
-                        url, len(j), list(j[0].keys()))
+            logger.info("[futures] API %d 筆，欄位：%s", len(j), list(j[0].keys()))
 
-            long_total = short_total = 0
+            lo = so = no = 0
             found = False
             for item in j:
-                # 欄位名稱相容中英文；TAIFEX 實際使用 "商品名稱" = "TX"
                 contract = str(
                     item.get("ContractName") or item.get("商品名稱") or
-                    item.get("契約名稱") or ""
+                    item.get("契約名稱") or item.get("Contract") or ""
                 ).strip()
                 institution = str(
                     item.get("InstitutionName") or item.get("身份別") or
-                    item.get("投資人別") or ""
+                    item.get("投資人別") or item.get("Institution") or ""
                 ).strip()
 
-                # TX = 台指期；也兼容中文名稱
                 if not any(k in contract for k in ("TX", "臺股", "台股")):
                     continue
                 if "外資" not in institution:
                     continue
 
-                long_total  += _int(item, "LongOpenInterest",  "多方未平倉口數")
-                short_total += _int(item, "ShortOpenInterest", "空方未平倉口數")
+                lo += _int(item, "LongOpenInterest",  "多方未平倉口數")
+                so += _int(item, "ShortOpenInterest", "空方未平倉口數")
+                no += _int(item, "NetOpenInterest",   "多空淨額未平倉口數")
                 found = True
 
             if found:
-                return {"long_oi": long_total, "short_oi": short_total,
-                        "net": long_total - short_total}
+                if lo or so:
+                    return {"long_oi": lo, "short_oi": so, "net": lo - so}
+                if no:
+                    return {"long_oi": 0, "short_oi": 0, "net": no}
 
         except Exception as e:
-            logger.info("[futures] %s 失敗: %s", url, e)
+            logger.info("[futures] API 失敗: %s", e)
 
-    logger.warning("[futures] 所有 TAIFEX 端點均失敗，外資台指期資料無法取得")
+    # ── Strategy 2: TAIFEX 官網 HTML 備援 ───────────────────────────────────
+    try:
+        today = date.today()
+        d_str = f"{today.year}/{today.month:02d}/{today.day:02d}"
+        html_url = (
+            "https://www.taifex.com.tw/cht/3/futContractsDt"
+            f"?queryStartDate={d_str}&queryEndDate={d_str}&contractId=TX"
+        )
+        req = urllib.request.Request(html_url, headers={
+            "User-Agent":      _UA,
+            "Accept":          "text/html,application/xhtml+xml",
+            "Accept-Language": "zh-TW,zh;q=0.9",
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read()
+
+        for enc in ("utf-8", "big5", "cp950"):
+            try:
+                content = raw.decode(enc); break
+            except UnicodeDecodeError:
+                pass
+        else:
+            content = raw.decode("utf-8", errors="replace")
+
+        logger.info("[futures_html] 頁面長度 %d 字元", len(content))
+
+        # 找 外資及陸資 區段並提取數字
+        # 表格欄順序：多方交易口數×2、空方交易口數×2、淨額交易×2、
+        #             多方未平倉×2、空方未平倉×2、淨額未平倉×2（共12個）
+        lo = so = 0
+        found = False
+        for tr_html in _re.findall(r'<tr[^>]*>(.*?)</tr>', content,
+                                   _re.DOTALL | _re.IGNORECASE):
+            if "外資及陸資" not in tr_html:
+                continue
+            nums = [int(m.replace(",", ""))
+                    for m in _re.findall(r'<td[^>]*>\s*([\d,]+)\s*</td>', tr_html)]
+            logger.info("[futures_html] 外資行 nums(%d)=%s", len(nums), nums[:12])
+            if len(nums) >= 10:
+                lo += nums[6]   # 多方未平倉口數
+                so += nums[8]   # 空方未平倉口數
+                found = True
+            elif len(nums) >= 4:
+                lo += nums[-4]
+                so += nums[-2]
+                found = True
+
+        if found:
+            logger.info("[futures_html] 解析成功 多=%d 空=%d", lo, so)
+            return {"long_oi": lo, "short_oi": so, "net": lo - so}
+        logger.info("[futures_html] 未找到外資及陸資行")
+
+    except Exception as e:
+        logger.info("[futures_html] 失敗: %s", e)
+
+    logger.warning("[futures] 所有管道均失敗，外資台指期資料無法取得")
     return None
 
 
