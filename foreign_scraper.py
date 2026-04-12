@@ -577,8 +577,14 @@ def _fetch_taiex_index() -> dict | None:
 
 def _fetch_bfi82u() -> dict | None:
     """
-    三大法人買賣超金額（億元）。
-    來源：TWSE BFI82U（外資 / 投信 / 自營商分開列示）。
+    上市三大法人買賣超金額（億元）。
+    來源：TWSE BFI82U（外資 / 投信 / 自營商合計行）。
+    BFI82U 資料列示：
+      外資及陸資(不含自營商) / 外資及陸資自營商 / 外資及陸資（合計）
+      投信
+      自營商(自行買賣) / 自營商(避險) / 自營商（合計）
+      三大法人
+    → 只取合計行（不含括號的行），金額單位：元，/ 1e8 → 億。
     """
     try:
         j = _get_json(
@@ -589,7 +595,6 @@ def _fetch_bfi82u() -> dict | None:
             return None
 
         fields = j.get("fields", [])
-        # 找買賣超金額欄位 index
         net_idx = 3
         for i, f in enumerate(fields):
             if "買賣超" in str(f):
@@ -605,11 +610,13 @@ def _fetch_bfi82u() -> dict | None:
                 continue
             net_b = round(raw / 1e8, 1)   # 元 → 億
 
-            if name in ("外陸資及陸資", "外資及陸資"):
+            # 外資合計行：含「外資及陸資」但排除子分類（不含…、自營）
+            if "外資及陸資" in name and "不含" not in name and "自營" not in name:
                 result["foreign"] = net_b
             elif name == "投信":
                 result["trust"] = net_b
-            elif name == "自營商":
+            # 自營商合計行：含「自營商」但排除子分類（括號版本）
+            elif "自營商" in name and "(" not in name and "（" not in name:
                 result["dealer"] = net_b
 
         if result:
@@ -617,6 +624,50 @@ def _fetch_bfi82u() -> dict | None:
             return result
     except Exception as e:
         logger.warning("[bfi82u] 失敗: %s", e)
+    return None
+
+
+def _fetch_tpex_institutional() -> dict | None:
+    """
+    上櫃三大法人買賣超金額（億元）。
+    來源：TPEX OpenAPI tpex_3insti_summary_bu（回傳千元，/ 1e5 → 億）。
+    """
+    try:
+        j = _get_json("https://www.tpex.org.tw/openapi/v1/tpex_3insti_summary_bu")
+        if not isinstance(j, list) or not j:
+            return None
+        latest = j[-1]   # 最新一筆（清單按日期遞增排列）
+        logger.info("[tpex_insti] 欄位：%s", list(latest.keys()))
+
+        def _to_yi(s) -> float | None:
+            try:
+                return round(int(str(s).replace(",", "").replace("+", "").strip()) / 1e5, 1)
+            except (ValueError, TypeError):
+                return None
+
+        result: dict[str, float] = {}
+        for key, val in latest.items():
+            v = _to_yi(val)
+            if v is None:
+                continue
+            kl = key.lower()
+            if "外資及陸資" in key and "淨" in key and "不含" not in key and "自營" not in key:
+                result["foreign"] = v
+            elif "投信" in key and "淨" in key:
+                result["trust"] = v
+            elif "自營商" in key and "淨" in key and "(" not in key and "（" not in key:
+                result["dealer"] = v
+            # 英文欄位 fallback
+            elif "foreign" in kl and "net" in kl and "trust" not in kl and "dealer" not in kl:
+                result.setdefault("foreign", v)
+            elif ("trust" in kl and "net" in kl) and "foreign" not in kl:
+                result.setdefault("trust", v)
+            elif "dealer" in kl and "net" in kl:
+                result.setdefault("dealer", v)
+
+        return result if result else None
+    except Exception as e:
+        logger.warning("[tpex_insti] 失敗: %s", e)
     return None
 
 
@@ -754,12 +805,29 @@ def _fetch_futures_position() -> dict | None:
 
 def fetch_market_overview() -> dict:
     """
-    大盤總覽：加權指數 + 三大法人合計（億元）+ 外資期貨淨多單。
+    大盤總覽：加權指數 + 三大法人合計（上市＋上櫃，億元）+ 外資期貨淨多單。
     任何子項目失敗不影響其他項目，回傳 None 表示該項目無資料。
     """
+    insti_twse = _fetch_bfi82u()
+    insti_tpex = _fetch_tpex_institutional()
+
+    # 合併上市 + 上櫃，任一有資料即顯示（另一方缺資料視為 0）
+    insti: dict | None = None
+    if insti_twse or insti_tpex:
+        insti = {}
+        for key in ("foreign", "trust", "dealer"):
+            t = (insti_twse or {}).get(key)
+            p = (insti_tpex or {}).get(key)
+            if t is not None or p is not None:
+                insti[key] = round((t or 0.0) + (p or 0.0), 1)
+        if insti:
+            insti["total"] = round(sum(insti.values()), 1)
+        else:
+            insti = None
+
     return {
         "index":   _fetch_taiex_index(),
-        "insti":   _fetch_bfi82u(),
+        "insti":   insti,
         "futures": _fetch_futures_position(),
     }
 
