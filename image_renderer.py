@@ -23,26 +23,36 @@ def _fmt_k(n: int | float) -> str:
     return f"{sign}{int(n)}"
 
 
-def _ma_tag(info: dict | None) -> str:
+def _ma_html(info: dict | None) -> str:
+    """
+    MA 標籤：台股慣例 紅=多頭（價格在均線上）  綠=空頭（價格在均線下）
+    回傳帶顏色 <span> 的 HTML 字串。
+    """
     if not info:
         return ""
     parts = []
     if info.get("ma20") is not None:
-        parts.append(("↑" if info["above_ma20"] else "↓") + "20" + ("▲" if info["ma20_up"] else "▼"))
+        cls   = "pos" if info["above_ma20"] else "neg"   # 上→紅 / 下→綠
+        arrow = "↑" if info["above_ma20"] else "↓"
+        trend = "▲" if info["ma20_up"]    else "▼"
+        parts.append(f'<span class="{cls}">{arrow}20{trend}</span>')
     if info.get("ma60") is not None:
-        parts.append(("↑" if info["above_ma60"] else "↓") + "60" + ("▲" if info["ma60_up"] else "▼"))
+        cls   = "pos" if info["above_ma60"] else "neg"
+        arrow = "↑" if info["above_ma60"] else "↓"
+        trend = "▲" if info["ma60_up"]    else "▼"
+        parts.append(f'<span class="{cls}">{arrow}60{trend}</span>')
     return "".join(parts)
 
 
-# ── CSS ───────────────────────────────────────────────────────────────────────
+# ── CSS（淺色主題，台股紅漲綠跌）─────────────────────────────────────────────
 
 _CSS = """
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
   font-family: 'Noto Sans CJK TC', 'Noto Sans TC', 'PingFang TC',
                'Microsoft JhengHei', 'WenQuanYi Micro Hei', sans-serif;
-  background: #0d1117;
-  color: #c9d1d9;
+  background: #f6f8fa;
+  color: #1f2328;
   padding: 14px;
   width: 1120px;
   font-size: 12.5px;
@@ -52,73 +62,77 @@ body {
 /* ── Header ── */
 .hdr {
   display: flex; justify-content: space-between; align-items: center;
-  background: linear-gradient(90deg, #161b22, #1a2332);
-  border: 1px solid #30363d; border-radius: 8px;
+  background: linear-gradient(90deg, #ffffff, #f0f6ff);
+  border: 1px solid #d0d7de; border-radius: 8px;
   padding: 12px 18px; margin-bottom: 10px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.06);
 }
-.hdr-title { font-size: 18px; font-weight: 700; color: #58a6ff; }
-.hdr-date  { color: #8b949e; font-size: 12.5px; }
+.hdr-title { font-size: 18px; font-weight: 700; color: #0969da; }
+.hdr-date  { color: #57606a; font-size: 12.5px; font-weight: 500; }
 
 /* ── Card ── */
 .card {
-  background: #161b22; border: 1px solid #30363d;
+  background: #ffffff; border: 1px solid #d0d7de;
   border-radius: 8px; padding: 12px 14px; margin-bottom: 10px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.04);
 }
 .card-title {
-  font-size: 14px; font-weight: 700; color: #58a6ff;
+  font-size: 14px; font-weight: 700; color: #0969da;
   padding-bottom: 8px; margin-bottom: 8px;
-  border-bottom: 1px solid #30363d;
+  border-bottom: 1px solid #eaeef2;
 }
 
 /* ── 大盤總覽 ── */
-.ov-grid  { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
-.ov-label { font-size: 11px; color: #8b949e; margin-bottom: 3px; }
+.ov-grid  { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+.ov-label { font-size: 11px; color: #57606a; font-weight: 600;
+            text-transform: uppercase; letter-spacing: .4px; margin-bottom: 4px; }
 .ov-val   { font-size: 22px; font-weight: 700; }
-.ov-sub   { font-size: 12px; margin-top: 3px; }
-.insti-row { display: flex; gap: 14px; margin-top: 5px; flex-wrap: wrap; }
-.ii-label  { font-size: 11px; color: #8b949e; }
-.ii-val    { font-size: 13px; font-weight: 700; }
+.ov-sub   { font-size: 12px; margin-top: 3px; font-weight: 600; }
+.insti-row { display: flex; gap: 16px; margin-top: 6px; flex-wrap: wrap; }
+.ii-label  { font-size: 10.5px; color: #57606a; }
+.ii-val    { font-size: 13.5px; font-weight: 700; }
 
 /* ── 排行榜 ── */
 .rank-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .badge {
-  display: inline-block; font-size: 11px; color: #8b949e;
-  background: #21262d; border-radius: 4px; padding: 1px 7px;
-  margin: 6px 0 4px;
+  display: inline-block; font-size: 11px; color: #57606a;
+  background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 4px;
+  padding: 1px 7px; margin: 6px 0 4px; font-weight: 600;
 }
 .srow {
-  display: flex; align-items: baseline;
-  padding: 2.5px 0; border-bottom: 1px solid #21262d; gap: 3px;
+  display: flex; align-items: center;
+  padding: 3px 0; border-bottom: 1px solid #f6f8fa; gap: 3px;
 }
 .srow:last-child { border-bottom: none; }
-.rn    { color: #484f58; width: 22px; flex-shrink: 0; font-size: 11.5px; }
-.sname { font-weight: 700; color: #e6edf3; flex: 1; min-width: 0;
+.rn    { color: #8c959f; width: 22px; flex-shrink: 0; font-size: 11.5px; }
+.sname { font-weight: 700; color: #1f2328; flex: 1; min-width: 0;
          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.scode { color: #8b949e; font-size: 10.5px; }
-.net   { font-weight: 700; width: 54px; text-align: right; flex-shrink: 0; }
-.price { color: #8b949e; font-size: 11px; width: 52px; text-align: right; flex-shrink: 0; }
-.ma    { color: #8b949e; font-size: 10.5px; width: 62px; flex-shrink: 0; }
-.no-data { color: #484f58; font-style: italic; font-size: 12px; padding: 4px 0; }
+.scode { color: #57606a; font-size: 10.5px; font-weight: 400; }
+.net   { font-weight: 700; width: 56px; text-align: right; flex-shrink: 0; font-size: 12.5px; }
+.price { color: #0550ae; font-size: 13.5px; font-weight: 700;
+         width: 58px; text-align: right; flex-shrink: 0; }
+.ma-wrap { font-size: 11px; width: 70px; flex-shrink: 0; font-weight: 700; }
+.no-data { color: #8c959f; font-style: italic; font-size: 12px; padding: 4px 0; }
 
 /* ── 族群彙計 ── */
-.sc-grid  { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.sec-title { font-size: 11px; font-weight: 700; color: #8b949e;
-             letter-spacing: 0.5px; margin-bottom: 5px; }
-.scrow { padding: 3.5px 0; border-bottom: 1px solid #21262d; }
+.sc-grid   { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.sec-title { font-size: 11px; font-weight: 700; color: #57606a;
+             letter-spacing: .5px; margin-bottom: 5px; }
+.scrow { padding: 3.5px 0; border-bottom: 1px solid #f6f8fa; }
 .scrow:last-child { border-bottom: none; }
 .sc-main { display: flex; align-items: baseline; gap: 4px; }
-.sc-name { font-weight: 700; color: #e6edf3; flex: 1; }
-.sc-sub  { font-size: 11px; color: #8b949e; margin-top: 1px; }
-.sc-ldr  { color: #e6edf3; font-weight: 700; }
+.sc-name { font-weight: 700; color: #1f2328; flex: 1; }
+.sc-sub  { font-size: 11px; color: #57606a; margin-top: 1px; }
+.sc-ldr  { color: #1f2328; font-weight: 700; }
 
-/* ── 顏色 ── */
-.pos { color: #3fb950; }
-.neg { color: #f85149; }
-.blu { color: #58a6ff; }
-.gld { color: #e3b341; }
+/* ── 顏色（台股慣例：紅漲綠跌）── */
+.pos { color: #cf222e; }   /* 紅＝漲 / 買超 / 在均線上 */
+.neg { color: #1a7f37; }   /* 綠＝跌 / 賣超 / 在均線下 */
+.blu { color: #0969da; }
+.gld { color: #9a6700; }
 
 /* ── Footer ── */
-.footer { text-align: center; color: #484f58; font-size: 11px; margin-top: 6px; }
+.footer { text-align: center; color: #8c959f; font-size: 11px; margin-top: 6px; }
 """
 
 
@@ -131,7 +145,7 @@ def _stock_rows(stocks: list[dict], ma_data: dict, color: str) -> str:
     for i, s in enumerate(stocks, 1):
         info  = ma_data.get(s["code"])
         price = f'${info["price"]}' if info and info.get("price") else ""
-        ma    = _ma_tag(info)
+        ma    = _ma_html(info)
         rows.append(
             f'<div class="srow">'
             f'<span class="rn">{i}.</span>'
@@ -139,7 +153,7 @@ def _stock_rows(stocks: list[dict], ma_data: dict, color: str) -> str:
             f'<span class="scode"> ({s["code"]})</span></span>'
             f'<span class="net {color}">{_fmt_k(s["net_k"])}張</span>'
             f'<span class="price">{price}</span>'
-            f'<span class="ma">{ma}</span>'
+            f'<span class="ma-wrap">{ma}</span>'
             f'</div>'
         )
     return "\n".join(rows)
@@ -184,7 +198,7 @@ def _overview_block(ov: dict | None) -> str:
             f'</div>'
         )
     else:
-        idx_h = '<div class="ov-val" style="color:#484f58">—</div>'
+        idx_h = '<div class="ov-val" style="color:#8c959f">—</div>'
 
     if insti:
         total = insti.get("total", 0)
@@ -204,7 +218,7 @@ def _overview_block(ov: dict | None) -> str:
             f'<div class="insti-row">{"".join(parts)}</div>'
         )
     else:
-        ins_h = '<div class="ov-val" style="color:#484f58">—</div>'
+        ins_h = '<div class="ov-val" style="color:#8c959f">—</div>'
 
     if fut:
         net  = fut["net"]
@@ -212,12 +226,12 @@ def _overview_block(ov: dict | None) -> str:
         sign = "+" if net >= 0 else ""
         fut_h = (
             f'<div class="ov-val {fc}">{sign}{net:,}口</div>'
-            f'<div class="ov-sub" style="color:#8b949e">'
+            f'<div class="ov-sub" style="color:#57606a">'
             f'多 {fut["long_oi"]:,} ／ 空 {fut["short_oi"]:,}'
             f'</div>'
         )
     else:
-        fut_h = '<div class="ov-val" style="color:#484f58">—</div>'
+        fut_h = '<div class="ov-val" style="color:#8c959f">—</div>'
 
     return (
         f'<div class="card">'
@@ -323,7 +337,10 @@ async def _async_render(html_content: str) -> bytes:
     from playwright.async_api import async_playwright  # lazy import
     async with async_playwright() as pw:
         browser = await pw.chromium.launch()
-        page    = await browser.new_page(viewport={"width": 1120, "height": 800})
+        page    = await browser.new_page(
+            viewport={"width": 1120, "height": 800},
+            device_scale_factor=2,   # 2× 解析度，截圖更清晰
+        )
         await page.set_content(html_content, wait_until="networkidle", timeout=30_000)
         png = await page.screenshot(full_page=True)
         await browser.close()

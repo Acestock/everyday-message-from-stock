@@ -514,36 +514,59 @@ def fetch_sector_institutional() -> dict:
 # ── 大盤總覽 ──────────────────────────────────────────────────────────────────
 
 def _fetch_taiex_index() -> dict | None:
-    """加權指數收盤、漲跌、漲跌幅（yfinance ^TWII，fallback TWSE MI_INDEX）。"""
-    # Method 1: yfinance
+    """加權指數收盤、漲跌、漲跌幅。"""
+    # Method 1: yfinance Ticker.history()（單支更穩定，避免 MultiIndex 問題）
+    try:
+        hist = yf.Ticker("^TWII").history(period="5d")
+        if hist is not None and not hist.empty:
+            c = hist["Close"].dropna()
+            if len(c) >= 2:
+                close, prev = float(c.iloc[-1]), float(c.iloc[-2])
+                chg = close - prev
+                return {"close": round(close, 2), "change": round(chg, 2),
+                        "change_pct": round(chg / prev * 100, 2)}
+    except Exception as e:
+        logger.debug("[taiex] yfinance Ticker 失敗: %s", e)
+
+    # Method 2: yfinance download（兼容新版 MultiIndex columns）
     try:
         df = yf.download("^TWII", period="5d", progress=False, auto_adjust=False)
-        if df is not None and len(df) >= 2:
-            close = float(df["Close"].iloc[-1])
-            prev  = float(df["Close"].iloc[-2])
-            chg   = close - prev
-            pct   = chg / prev * 100
-            return {"close": round(close, 2), "change": round(chg, 2),
-                    "change_pct": round(pct, 2)}
+        if df is not None and not df.empty:
+            close_col = (df["Close"]["^TWII"] if isinstance(df.columns, pd.MultiIndex)
+                         else df["Close"])
+            c = close_col.dropna()
+            if len(c) >= 2:
+                close, prev = float(c.iloc[-1]), float(c.iloc[-2])
+                chg = close - prev
+                return {"close": round(close, 2), "change": round(chg, 2),
+                        "change_pct": round(chg / prev * 100, 2)}
     except Exception as e:
-        logger.debug("[taiex] yfinance 失敗: %s", e)
+        logger.debug("[taiex] yfinance download 失敗: %s", e)
 
-    # Method 2: TWSE MI_INDEX API
+    # Method 3: TWSE MI_INDEX API（遍歷所有 data 欄位，不依賴固定 key）
     try:
         j = _get_json(
             "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
-            "?response=json&type=IND"
+            f"?response=json&date={date.today().strftime('%Y%m%d')}&type=IND"
         )
         if j.get("stat") == "OK":
-            for row in j.get("data9", j.get("data", [])):
-                if row and "加權" in str(row[0]):
-                    def _safe(s: str) -> float:
-                        return float(str(s).replace(",", "").replace("+", ""))
-                    close = _safe(row[1])
-                    chg   = _safe(row[2]) * (-1 if "▼" in str(row[4]) else 1)
-                    pct   = _safe(row[3]) * (-1 if "▼" in str(row[4]) else 1)
-                    return {"close": round(close, 2), "change": round(chg, 2),
-                            "change_pct": round(pct, 2)}
+            for v in j.values():
+                if not isinstance(v, list):
+                    continue
+                for row in v:
+                    if not isinstance(row, list) or not row:
+                        continue
+                    if "加權" not in str(row[0]):
+                        continue
+                    sign = -1 if any("▼" in str(c) for c in row) else 1
+                    try:
+                        close = float(str(row[1]).replace(",", ""))
+                        chg   = float(str(row[2]).replace(",", "").replace("+", "")) * sign
+                        pct   = float(str(row[3]).replace(",", "").replace("+", "")) * sign
+                        return {"close": round(close, 2), "change": round(chg, 2),
+                                "change_pct": round(pct, 2)}
+                    except Exception:
+                        continue
     except Exception as e:
         logger.warning("[taiex] MI_INDEX 失敗: %s", e)
 
