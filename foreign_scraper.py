@@ -1,5 +1,6 @@
 """
 外資 / 投信買賣超：每日從 TWSE（上市）與 TPEx（上櫃）抓取前 10 大買超 / 賣超個股。
+另提供「法人積極資金族群」：外資＋投信同日雙向買超的股票。
 
 資料來源（官方 JSON API，無需 token）：
   TWSE  https://www.twse.com.tw/rwd/zh/fund/T86
@@ -20,17 +21,23 @@ from typing import Optional
 import pandas as pd
 import yfinance as yf
 
+from sector_themes import THEME_MAP
+
 logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 
-# 分別快取外資 / 投信
-_foreign_cache: dict             = {}
-_foreign_cache_date: Optional[str] = None
-_trust_cache: dict               = {}
-_trust_cache_date: Optional[str] = None
+# 共用原始資料快取（TWSE + TPEx 一次抓完，三個公開函式共用）
+_all_raw_cache: Optional[dict] = None
+_all_raw_cache_date: Optional[str] = None
 
-TOP_N   = 10
+# 產業類別 mapping 快取
+_industry_map: dict[str, str] = {}
+_industry_map_date: Optional[str] = None
+
+TOP_N        = 10
+TOP_SECTOR   = 10   # 族群買超/賣超顯示前 N 個產業
+TOP_ACTIVE   = 20   # 外資投信雙買超個股最多顯示筆數
 TIMEOUT = 12
 
 _UA = (
@@ -155,21 +162,8 @@ def _fetch_tpex_3insti() -> tuple[list[dict], list[dict], str]:
     """
     上櫃三大法人買賣明細（一支 API 同時含外資與投信）。
     回傳 (foreign_stocks, trust_stocks, date_str)。
-
-    欄位順序（千股 = 張）：
-      0  代號
-      1  名稱
-      2  外資買進
-      3  外資賣出
-      4  外資買賣超
-      5  投信買進
-      6  投信賣出
-      7  投信買賣超
-      8  自營商買賣超(含避險)
-      9  三大法人合計買賣超
     """
     roc_date = _today_roc()
-    # 嘗試多組 URL；通常帶日期參數的第一個就能成功
     candidate_urls = [
         (
             "https://www.tpex.org.tw/web/stock/3insti/daily_trade/"
@@ -202,14 +196,6 @@ def _fetch_tpex_3insti() -> tuple[list[dict], list[dict], str]:
         date_str = _roc_to_ce(raw_date) if raw_date else ""
         rows     = table.get("data", [])
 
-        # 欄位索引（columnNum=25）：
-        # 0 代號, 1 名稱
-        # 2-4  外資(不含自營)買進/賣出/買賣超
-        # 5-7  外資自營商買進/賣出/買賣超
-        # 8-10 外資及陸資合計買進/賣出/買賣超  ← col 10
-        # 11-13 投信買進/賣出/買賣超           ← col 13
-        # 14-22 自營商(自行/避險/合計) ...
-        # 23   三大法人合計買賣超
         FOREIGN_COL = 10
         TRUST_COL   = 13
 
@@ -219,7 +205,7 @@ def _fetch_tpex_3insti() -> tuple[list[dict], list[dict], str]:
             try:
                 code = str(row[0]).strip()
                 name = str(row[1]).strip()
-                fnet = round(_clean_num(row[FOREIGN_COL]) / 1000)   # 股 → 張
+                fnet = round(_clean_num(row[FOREIGN_COL]) / 1000)
                 tnet = round(_clean_num(row[TRUST_COL])   / 1000)
                 if fnet != 0:
                     foreign_list.append({"code": code, "name": name,
@@ -239,14 +225,54 @@ def _fetch_tpex_3insti() -> tuple[list[dict], list[dict], str]:
         return [], [], ""
 
 
+# ── 共用原始資料（一次抓完，三個公開函式共用）────────────────────────────────
+
+def _fetch_all_raw() -> dict:
+    """
+    抓取並快取當日所有法人原始資料。
+    回傳：
+    {
+      "date": str,
+      "twse_foreign": [...],  # 上市外資（全部）
+      "twse_trust":   [...],  # 上市投信（全部）
+      "tpex_foreign": [...],  # 上櫃外資（全部）
+      "tpex_trust":   [...],  # 上櫃投信（全部）
+    }
+    """
+    global _all_raw_cache, _all_raw_cache_date
+
+    today = date.today().strftime("%Y-%m-%d")
+    with _lock:
+        if _all_raw_cache_date == today and _all_raw_cache:
+            return _all_raw_cache
+
+    twse_f, twse_date       = _fetch_twse_base("foreign")
+    twse_t, _               = _fetch_twse_base("trust")
+    tpex_f, tpex_t, tpex_d = _fetch_tpex_3insti()
+    data_date = twse_date or tpex_d or today.replace("-", "/")
+
+    result = {
+        "date":         data_date,
+        "twse_foreign": twse_f,
+        "twse_trust":   twse_t,
+        "tpex_foreign": tpex_f,
+        "tpex_trust":   tpex_t,
+    }
+    with _lock:
+        _all_raw_cache      = result
+        _all_raw_cache_date = today
+    return result
+
+
 # ── MA 技術資料 ───────────────────────────────────────────────────────────────
 
 def _download_ohlcv(tickers: list[str]) -> tuple[dict, dict]:
-    """批次下載近 3 個月收盤 + 成交量；回傳 (closes_dict, volumes_dict)。"""
+    """批次下載近 6 個月收盤 + 成交量；回傳 (closes_dict, volumes_dict)。
+    使用 6mo 而非 3mo，確保春節等長假後仍有 ≥60 個交易日供 MA60 計算。"""
     if not tickers:
         return {}, {}
     try:
-        df = yf.download(tickers, period="3mo", progress=False, auto_adjust=False)
+        df = yf.download(tickers, period="6mo", progress=False, auto_adjust=False)
         if df is None or df.empty:
             return {}, {}
         if isinstance(df.columns, pd.MultiIndex):
@@ -278,17 +304,14 @@ def fetch_ma_data(
     批次抓取股價 + MA20 + MA60 及其走勢方向。
     codes 可傳：
       - list[str]：全部先試 .TW，抓不到再試 .TWO
-      - list[dict]：每筆含 code/market，依 market 只查對應 suffix，
-                    避免把上市股誤當上櫃查（yfinance 噪音）
+      - list[dict]：每筆含 code/market，依 market 只查對應 suffix
     回傳：
       {code: {price, ma20, ma20_up, above_ma20, ma60, ma60_up, above_ma60}}
-    找不到資料的 code 不會出現在結果中。
     """
     result: dict[str, dict] = {}
     if not codes:
         return result
 
-    # 若傳入 dict 清單，依 market 分流；否則退回舊行為
     if isinstance(codes[0], dict):
         tw_codes  = [s["code"] for s in codes if s.get("market") != "上櫃"]
         two_codes = [s["code"] for s in codes if s.get("market") == "上櫃"]
@@ -338,25 +361,26 @@ def fetch_ma_data(
             "ma60":       round(ma60, 1) if ma60 is not None else None,
             "ma60_up":    ma60_up,
             "above_ma60": above_ma60,
-            "volume_k":   vol_k,          # 今日成交量（張），供占比計算
+            "volume_k":   vol_k,
         }
 
     logger.debug("[ma] fetch_ma_data: %d / %d 支成功", len(result), len(codes))
     return result
 
 
+# ── ETF 判斷 ─────────────────────────────────────────────────────────────────
+
+def _is_etf(code: str) -> bool:
+    """台股 ETF 代號均以 '0' 開頭；普通股從 1xxx 起，不會以 0 開頭。"""
+    return code.startswith("0")
+
+
 # ── 共用排名邏輯 ──────────────────────────────────────────────────────────────
 
 def _build_rank(all_stocks: list[dict], data_date: str) -> dict:
-    """
-    依市場（上市 / 上櫃）分別排名，回傳：
-    {
-      "date": str,
-      "twse": {"buy": [...Top10], "sell": [...Top10]},
-      "tpex": {"buy": [...Top10], "sell": [...Top10]},
-    }
-    """
     def _split(stocks: list[dict]) -> dict:
+        # 過濾 ETF
+        stocks = [s for s in stocks if not _is_etf(s["code"])]
         buy  = sorted(
             [s for s in stocks if s["net_k"] > 0],
             key=lambda x: x["net_k"], reverse=True,
@@ -374,51 +398,435 @@ def _build_rank(all_stocks: list[dict], data_date: str) -> dict:
 
 # ── 公開 API ───────────────────────────────────────────────────────────────────
 
-def fetch_foreign_rank() -> dict:
+def _fetch_industry_map() -> dict[str, str]:
     """
-    抓取外資買賣超（TWSE + TPEx），回傳：
-    {"date","buy":[{code,name,net_k,market}],"sell":[...]}
-    結果按交易日快取。
+    從 TWSE / TPEx Open API 抓取 股票代號 → 產業類別 mapping（每日快取）。
+    抓取失敗時回傳空 dict，呼叫端應以「其他」作 fallback。
     """
-    global _foreign_cache, _foreign_cache_date
+    global _industry_map, _industry_map_date
 
     today = date.today().strftime("%Y-%m-%d")
     with _lock:
-        if _foreign_cache_date == today and _foreign_cache:
-            return _foreign_cache
+        if _industry_map_date == today and _industry_map:
+            return _industry_map
 
-    twse_stocks, twse_date           = _fetch_twse_base("foreign")
-    tpex_foreign, _, tpex_date       = _fetch_tpex_3insti()
-    all_stocks = twse_stocks + tpex_foreign
-    data_date  = twse_date or tpex_date or today.replace("-", "/")
+    mapping: dict[str, str] = {}
 
-    result = _build_rank(all_stocks, data_date)
+    # TWSE 上市 Open API（t187ap03_L）
+    # 欄位：公司代號, 公司名稱, 產業類別, ...
+    for url in [
+        "https://openapi.twse.com.tw/v1/opendata/t187ap03_L",
+    ]:
+        try:
+            j = _get_json(url)
+            if isinstance(j, list):
+                for item in j:
+                    code     = str(item.get("公司代號", "")).strip()
+                    industry = str(item.get("產業類別", "")).strip()
+                    if code and industry:
+                        mapping[code] = industry
+            if mapping:
+                break
+        except Exception as e:
+            logger.warning("[industry_map] TWSE open API 失敗: %s", e)
+
+    # TPEx 上櫃 Open API（t187ap04_L）
+    for url in [
+        "https://openapi.twse.com.tw/v1/opendata/t187ap04_L",
+    ]:
+        try:
+            j = _get_json(url)
+            if isinstance(j, list):
+                for item in j:
+                    code     = str(item.get("公司代號", "")).strip()
+                    industry = str(item.get("產業類別", "")).strip()
+                    if code and industry:
+                        mapping[code] = industry
+        except Exception as e:
+            logger.warning("[industry_map] TPEx open API 失敗: %s", e)
+
     with _lock:
-        _foreign_cache      = result
-        _foreign_cache_date = today
-    return result
+        _industry_map      = mapping
+        _industry_map_date = today
+
+    logger.info("[industry_map] 共 %d 支股票產業資料", len(mapping))
+    return mapping
+
+
+def fetch_sector_institutional() -> dict:
+    """
+    法人資金族群彙計：將外資＋投信買賣超依產業類別加總，
+    回傳買超 / 賣超前 TOP_SECTOR 個產業。
+    回傳格式：
+    {
+      "date": str,
+      "buy":  [{sector, foreign_net, trust_net, total_net, top_stock}, ...],
+      "sell": [{sector, foreign_net, trust_net, total_net, top_stock}, ...],
+    }
+    top_stock: {"code": str, "name": str, "net_k": int}
+    """
+    raw          = _fetch_all_raw()
+    industry_map = _fetch_industry_map()
+
+    # sectors[sec] = {foreign_net, trust_net, stock_nets:{code:{name,total}}}
+    sectors: dict[str, dict] = {}
+
+    def _agg(stocks: list[dict], key: str) -> None:
+        for s in stocks:
+            sec = THEME_MAP.get(s["code"]) or industry_map.get(s["code"], "其他")
+            if sec not in sectors:
+                sectors[sec] = {"foreign_net": 0, "trust_net": 0, "stock_nets": {}}
+            sectors[sec][key] += s["net_k"]
+            code = s["code"]
+            if code not in sectors[sec]["stock_nets"]:
+                sectors[sec]["stock_nets"][code] = {"name": s["name"], "total": 0}
+            sectors[sec]["stock_nets"][code]["total"] += s["net_k"]
+
+    _agg(raw["twse_foreign"] + raw["tpex_foreign"], "foreign_net")
+    _agg(raw["twse_trust"]   + raw["tpex_trust"],   "trust_net")
+
+    rows = []
+    for sec, v in sectors.items():
+        total       = v["foreign_net"] + v["trust_net"]
+        stock_nets  = v["stock_nets"]
+        if stock_nets:
+            # 取與族群同方向最大貢獻的個股
+            pick = max if total >= 0 else min
+            code, info = pick(stock_nets.items(), key=lambda x: x[1]["total"])
+            top_stock = {"code": code, "name": info["name"], "net_k": info["total"]}
+        else:
+            top_stock = None
+        rows.append({
+            "sector":      sec,
+            "foreign_net": v["foreign_net"],
+            "trust_net":   v["trust_net"],
+            "total_net":   total,
+            "top_stock":   top_stock,
+        })
+
+    buy  = sorted([r for r in rows if r["total_net"] > 0],
+                  key=lambda x: x["total_net"], reverse=True)[:TOP_SECTOR]
+    sell = sorted([r for r in rows if r["total_net"] < 0],
+                  key=lambda x: x["total_net"])[:TOP_SECTOR]
+
+    logger.info("[sector] 買超族群 %d 個，賣超族群 %d 個", len(buy), len(sell))
+    return {"date": raw["date"], "buy": buy, "sell": sell}
+
+
+# ── 大盤總覽 ──────────────────────────────────────────────────────────────────
+
+def _fetch_taiex_index() -> dict | None:
+    """加權指數收盤、漲跌、漲跌幅。"""
+    # Method 1: yfinance Ticker.history()（單支更穩定，避免 MultiIndex 問題）
+    try:
+        hist = yf.Ticker("^TWII").history(period="5d")
+        if hist is not None and not hist.empty:
+            c = hist["Close"].dropna()
+            if len(c) >= 2:
+                close, prev = float(c.iloc[-1]), float(c.iloc[-2])
+                chg = close - prev
+                return {"close": round(close, 2), "change": round(chg, 2),
+                        "change_pct": round(chg / prev * 100, 2)}
+    except Exception as e:
+        logger.debug("[taiex] yfinance Ticker 失敗: %s", e)
+
+    # Method 2: yfinance download（兼容新版 MultiIndex columns）
+    try:
+        df = yf.download("^TWII", period="5d", progress=False, auto_adjust=False)
+        if df is not None and not df.empty:
+            close_col = (df["Close"]["^TWII"] if isinstance(df.columns, pd.MultiIndex)
+                         else df["Close"])
+            c = close_col.dropna()
+            if len(c) >= 2:
+                close, prev = float(c.iloc[-1]), float(c.iloc[-2])
+                chg = close - prev
+                return {"close": round(close, 2), "change": round(chg, 2),
+                        "change_pct": round(chg / prev * 100, 2)}
+    except Exception as e:
+        logger.debug("[taiex] yfinance download 失敗: %s", e)
+
+    # Method 3: TWSE MI_INDEX API（遍歷所有 data 欄位，不依賴固定 key）
+    try:
+        j = _get_json(
+            "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
+            f"?response=json&date={date.today().strftime('%Y%m%d')}&type=IND"
+        )
+        if j.get("stat") == "OK":
+            for v in j.values():
+                if not isinstance(v, list):
+                    continue
+                for row in v:
+                    if not isinstance(row, list) or not row:
+                        continue
+                    if "加權" not in str(row[0]):
+                        continue
+                    sign = -1 if any("▼" in str(c) for c in row) else 1
+                    try:
+                        close = float(str(row[1]).replace(",", ""))
+                        chg   = float(str(row[2]).replace(",", "").replace("+", "")) * sign
+                        pct   = float(str(row[3]).replace(",", "").replace("+", "")) * sign
+                        return {"close": round(close, 2), "change": round(chg, 2),
+                                "change_pct": round(pct, 2)}
+                    except Exception:
+                        continue
+    except Exception as e:
+        logger.warning("[taiex] MI_INDEX 失敗: %s", e)
+
+    return None
+
+
+def _fetch_bfi82u() -> dict | None:
+    """
+    三大法人買賣超金額（億元）。
+    來源：TWSE BFI82U（外資 / 投信 / 自營商分開列示）。
+    """
+    try:
+        j = _get_json(
+            "https://www.twse.com.tw/rwd/zh/fund/BFI82U"
+            "?response=json&dayDate=&type=day"
+        )
+        if j.get("stat") != "OK":
+            return None
+
+        fields = j.get("fields", [])
+        # 找買賣超金額欄位 index
+        net_idx = 3
+        for i, f in enumerate(fields):
+            if "買賣超" in str(f):
+                net_idx = i
+                break
+
+        result: dict[str, float] = {}
+        for row in j.get("data", []):
+            name = str(row[0]).strip()
+            try:
+                raw = float(str(row[net_idx]).replace(",", ""))
+            except (ValueError, IndexError):
+                continue
+            net_b = round(raw / 1e8, 1)   # 元 → 億
+
+            if name in ("外陸資及陸資", "外資及陸資"):
+                result["foreign"] = net_b
+            elif name == "投信":
+                result["trust"] = net_b
+            elif name == "自營商":
+                result["dealer"] = net_b
+
+        if result:
+            result["total"] = round(sum(result.values()), 1)
+            return result
+    except Exception as e:
+        logger.warning("[bfi82u] 失敗: %s", e)
+    return None
+
+
+def _fetch_futures_position() -> dict | None:
+    """
+    外資台指期貨未平倉淨多單口數。
+    Strategy 1：TAIFEX Open API（openapi.taifex.com.tw）。
+    Strategy 2：TAIFEX 官網 HTML 表格備援。
+
+    TAIFEX API 實際欄位名：
+      商品名稱 = "TX"（非 "臺股期貨"）
+      身份別   = "外資及陸資"
+    """
+    import re as _re
+    import urllib.parse
+
+    def _int(item: dict, *keys: str) -> int:
+        for k in keys:
+            v = item.get(k)
+            if v is not None:
+                try:
+                    return int(str(v).replace(",", "").strip() or "0")
+                except (ValueError, TypeError):
+                    pass
+        return 0
+
+    # ── Strategy 1: TAIFEX Open API ──────────────────────────────────────────
+    for url in [
+        "https://openapi.taifex.com.tw/v1/DailyForeignInstitutionalInvestors",
+        "https://openapi.taifex.com.tw/v1/TaifexDailyForeignInstitutionalInvestors",
+    ]:
+        try:
+            j = _get_json(url)
+            # 兼容 dict wrapper {"data": [...]}
+            if isinstance(j, dict):
+                for wrap_key in ("data", "Data", "result", "records"):
+                    if isinstance(j.get(wrap_key), list):
+                        j = j[wrap_key]
+                        break
+            if not isinstance(j, list) or not j:
+                logger.info("[futures] API %s → 空或非 list", url.split("/")[-1])
+                continue
+
+            logger.info("[futures] API %d 筆，欄位：%s", len(j), list(j[0].keys()))
+
+            lo = so = no = 0
+            found = False
+            for item in j:
+                contract = str(
+                    item.get("ContractName") or item.get("商品名稱") or
+                    item.get("契約名稱") or item.get("Contract") or ""
+                ).strip()
+                institution = str(
+                    item.get("InstitutionName") or item.get("身份別") or
+                    item.get("投資人別") or item.get("Institution") or ""
+                ).strip()
+
+                if not any(k in contract for k in ("TX", "臺股", "台股")):
+                    continue
+                if "外資" not in institution:
+                    continue
+
+                lo += _int(item, "LongOpenInterest",  "多方未平倉口數")
+                so += _int(item, "ShortOpenInterest", "空方未平倉口數")
+                no += _int(item, "NetOpenInterest",   "多空淨額未平倉口數")
+                found = True
+
+            if found:
+                if lo or so:
+                    return {"long_oi": lo, "short_oi": so, "net": lo - so}
+                if no:
+                    return {"long_oi": 0, "short_oi": 0, "net": no}
+
+        except Exception as e:
+            logger.info("[futures] API 失敗: %s", e)
+
+    # ── Strategy 2: TAIFEX 官網 HTML 備援 ───────────────────────────────────
+    try:
+        today = date.today()
+        d_str = f"{today.year}/{today.month:02d}/{today.day:02d}"
+        html_url = (
+            "https://www.taifex.com.tw/cht/3/futContractsDt"
+            f"?queryStartDate={d_str}&queryEndDate={d_str}&contractId=TX"
+        )
+        req = urllib.request.Request(html_url, headers={
+            "User-Agent":      _UA,
+            "Accept":          "text/html,application/xhtml+xml",
+            "Accept-Language": "zh-TW,zh;q=0.9",
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read()
+
+        for enc in ("utf-8", "big5", "cp950"):
+            try:
+                content = raw.decode(enc); break
+            except UnicodeDecodeError:
+                pass
+        else:
+            content = raw.decode("utf-8", errors="replace")
+
+        logger.info("[futures_html] 頁面長度 %d 字元", len(content))
+
+        # 找 外資及陸資 區段並提取數字
+        # 表格欄順序：多方交易口數×2、空方交易口數×2、淨額交易×2、
+        #             多方未平倉×2、空方未平倉×2、淨額未平倉×2（共12個）
+        lo = so = 0
+        found = False
+        for tr_html in _re.findall(r'<tr[^>]*>(.*?)</tr>', content,
+                                   _re.DOTALL | _re.IGNORECASE):
+            if "外資及陸資" not in tr_html:
+                continue
+            nums = [int(m.replace(",", ""))
+                    for m in _re.findall(r'<td[^>]*>\s*([\d,]+)\s*</td>', tr_html)]
+            logger.info("[futures_html] 外資行 nums(%d)=%s", len(nums), nums[:12])
+            if len(nums) >= 10:
+                lo += nums[6]   # 多方未平倉口數
+                so += nums[8]   # 空方未平倉口數
+                found = True
+            elif len(nums) >= 4:
+                lo += nums[-4]
+                so += nums[-2]
+                found = True
+
+        if found:
+            logger.info("[futures_html] 解析成功 多=%d 空=%d", lo, so)
+            return {"long_oi": lo, "short_oi": so, "net": lo - so}
+        logger.info("[futures_html] 未找到外資及陸資行")
+
+    except Exception as e:
+        logger.info("[futures_html] 失敗: %s", e)
+
+    logger.warning("[futures] 所有管道均失敗，外資台指期資料無法取得")
+    return None
+
+
+def fetch_market_overview() -> dict:
+    """
+    大盤總覽：加權指數 + 三大法人合計（億元）+ 外資期貨淨多單。
+    任何子項目失敗不影響其他項目，回傳 None 表示該項目無資料。
+    """
+    return {
+        "index":   _fetch_taiex_index(),
+        "insti":   _fetch_bfi82u(),
+        "futures": _fetch_futures_position(),
+    }
+
+
+def fetch_foreign_rank() -> dict:
+    """外資買賣超排行（上市 + 上櫃 Top 10）。"""
+    raw = _fetch_all_raw()
+    all_stocks = raw["twse_foreign"] + raw["tpex_foreign"]
+    return _build_rank(all_stocks, raw["date"])
 
 
 def fetch_trust_rank() -> dict:
+    """投信買賣超排行（上市 + 上櫃 Top 10）。"""
+    raw = _fetch_all_raw()
+    all_stocks = raw["twse_trust"] + raw["tpex_trust"]
+    return _build_rank(all_stocks, raw["date"])
+
+
+def fetch_institutional_active() -> dict:
     """
-    抓取投信買賣超（TWSE + TPEx），回傳：
-    {"date","buy":[{code,name,net_k,market}],"sell":[...]}
-    結果按交易日快取。
+    法人積極資金族群：外資＋投信同日雙向買超的股票。
+    回傳：
+    {
+      "date": str,
+      "stocks": [
+        {
+          "code", "name", "market",
+          "foreign_net_k", "trust_net_k", "total_net_k"
+        }, ...
+      ]  # 按合計買超張數排序，最多 TOP_ACTIVE 筆
+    }
     """
-    global _trust_cache, _trust_cache_date
+    raw = _fetch_all_raw()
 
-    today = date.today().strftime("%Y-%m-%d")
-    with _lock:
-        if _trust_cache_date == today and _trust_cache:
-            return _trust_cache
+    # 建立外資買超 map {code → stock_dict}
+    foreign_buy: dict[str, dict] = {
+        s["code"]: s
+        for s in (raw["twse_foreign"] + raw["tpex_foreign"])
+        if s["net_k"] > 0
+    }
+    # 建立投信買超 map {code → stock_dict}
+    trust_buy: dict[str, dict] = {
+        s["code"]: s
+        for s in (raw["twse_trust"] + raw["tpex_trust"])
+        if s["net_k"] > 0
+    }
 
-    twse_stocks, twse_date           = _fetch_twse_base("trust")
-    _, tpex_trust, tpex_date         = _fetch_tpex_3insti()
-    all_stocks = twse_stocks + tpex_trust
-    data_date  = twse_date or tpex_date or today.replace("-", "/")
+    # 取交集：同日外資＋投信同時買超
+    both_codes = set(foreign_buy) & set(trust_buy)
 
-    result = _build_rank(all_stocks, data_date)
-    with _lock:
-        _trust_cache      = result
-        _trust_cache_date = today
-    return result
+    active = []
+    for code in both_codes:
+        f = foreign_buy[code]
+        t = trust_buy[code]
+        active.append({
+            "code":          code,
+            "name":          f["name"],
+            "market":        f["market"],
+            "foreign_net_k": f["net_k"],
+            "trust_net_k":   t["net_k"],
+            "total_net_k":   f["net_k"] + t["net_k"],
+        })
+
+    active.sort(key=lambda x: x["total_net_k"], reverse=True)
+    logger.info("[institutional_active] 外資投信雙買超：%d 支", len(active))
+
+    return {
+        "date":   raw["date"],
+        "stocks": active[:TOP_ACTIVE],
+    }

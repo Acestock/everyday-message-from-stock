@@ -1,50 +1,23 @@
 name: Daily Stock Report
 
 on:
-  # 每週一至五 16:30 台灣時間（= UTC 08:30）自動執行
+  # 每週一至五 18:00 台灣時間（= UTC 10:00）自動執行
   schedule:
-    - cron: '30 8 * * 1-5'
+    - cron: '0 10 * * 1-5'
 
   # 手動觸發（可在 GitHub Actions 頁面按 "Run workflow"）
   workflow_dispatch:
-    inputs:
-      report_type:
-        description: '要發送的報告類型'
-        required: false
-        default: 'all'
-        type: choice
-        options:
-          - all
-          - foreign
-          - trust
 
 jobs:
   send-report:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Verify Discord Webhook URL
-        env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: |
-          echo "URL length: ${#DISCORD_WEBHOOK_URL}"
-          echo "URL prefix: ${DISCORD_WEBHOOK_URL:0:34}"
-          HTTP_CODE=$(curl -s -o /tmp/discord_resp.txt -w "%{http_code}" \
-            -X POST "$DISCORD_WEBHOOK_URL" \
-            -H "Content-Type: application/json" \
-            -d '{"content":"GitHub Actions 連線測試（可忽略此訊息）"}')
-          echo "Discord HTTP status: $HTTP_CODE"
-          echo "Discord response: $(cat /tmp/discord_resp.txt)"
-          if [ "$HTTP_CODE" != "204" ] && [ "$HTTP_CODE" != "200" ]; then
-            echo "::error::Webhook 驗證失敗，HTTP $HTTP_CODE"
-            exit 1
-          fi
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -55,8 +28,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Install CJK font and Playwright browsers
+        run: |
+          sudo apt-get install -y fonts-noto-cjk
+          playwright install chromium --with-deps
+
       - name: Send stock report
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          REPORT_TYPE: ${{ inputs.report_type || 'all' }}
         run: python send_report.py

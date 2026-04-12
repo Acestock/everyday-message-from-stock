@@ -1,5 +1,5 @@
 """
-每日股市資金流向報告：透過 Discord Webhook 發送外資 / 投信買賣超排行。
+每日股市資金流向報告：抓取資料 → 渲染成 PNG → 透過 Discord Webhook 上傳圖片。
 
 用法：
   export DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
@@ -21,7 +21,14 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from message_formatter import build_foreign_payload, build_trust_payload
+from foreign_scraper import (
+    fetch_foreign_rank,
+    fetch_ma_data,
+    fetch_market_overview,
+    fetch_sector_institutional,
+    fetch_trust_rank,
+)
+from image_renderer import render_report_png
 
 load_dotenv()
 
@@ -31,25 +38,46 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+WEBHOOK_USERNAME   = os.getenv("WEBHOOK_USERNAME",   "台股法人雷達 📡")
+WEBHOOK_AVATAR_URL = os.getenv("WEBHOOK_AVATAR_URL", "").strip()
 
-def post_to_webhook(webhook_url: str, payload: dict[str, Any]) -> None:
-    """將 payload 以 POST 送至 Discord Webhook。"""
-    data = json.dumps(payload).encode("utf-8")
+
+def post_image_to_webhook(webhook_url: str, png_bytes: bytes) -> None:
+    """將 PNG 圖片以 multipart/form-data 上傳至 Discord Webhook。"""
+    boundary = "----DiscordBoundary" + os.urandom(8).hex()
+
+    payload: dict[str, Any] = {"username": WEBHOOK_USERNAME}
+    if WEBHOOK_AVATAR_URL:
+        payload["avatar_url"] = WEBHOOK_AVATAR_URL
+
+    request_body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="payload_json"\r\n'
+        f"Content-Type: application/json\r\n\r\n"
+        f"{json.dumps(payload)}\r\n"
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="files[0]"; filename="daily_report.png"\r\n'
+        f"Content-Type: image/png\r\n\r\n"
+    ).encode("utf-8") + png_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+
     req = urllib.request.Request(
         webhook_url,
-        data=data,
-        headers={"Content-Type": "application/json"},
+        data=request_body,
+        headers={
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "User-Agent": "DiscordBot (https://github.com/acestock/everyday-message-from-stock, 1.0)",
+        },
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=60) as resp:
             status = resp.status
             if status not in (200, 204):
                 raise RuntimeError(f"Webhook 回應非預期狀態碼: {status}")
-        logger.info("Webhook 發送成功（HTTP %s）", status)
+        logger.info("圖片發送成功（HTTP %s，%.1f KB）", status, len(png_bytes) / 1024)
     except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        logger.error("Discord 回應 HTTP %s: %s", e.code, body)
+        error_body = e.read().decode("utf-8", errors="replace")
+        logger.error("Discord 回應 HTTP %s: %s", e.code, error_body)
         raise
 
 
@@ -59,32 +87,89 @@ def main() -> None:
         logger.error("未設定 DISCORD_WEBHOOK_URL，請在環境變數或 .env 中設定")
         sys.exit(1)
 
-    report_type = os.getenv("REPORT_TYPE", "all").strip().lower()
+    # ── 抓取各項資料（各自 try/except，任一失敗不中斷其他）────────────────────
+    overview     = None
+    foreign_rank = {"twse": {"buy": [], "sell": []}, "tpex": {"buy": [], "sell": []}, "date": "—"}
+    trust_rank   = {"twse": {"buy": [], "sell": []}, "tpex": {"buy": [], "sell": []}, "date": "—"}
+    sector_data  = {"buy": [], "sell": [], "date": "—"}
     errors: list[str] = []
 
-    tasks = []
-    if report_type in ("all", "foreign"):
-        tasks.append(("外資", build_foreign_payload))
-    if report_type in ("all", "trust"):
-        tasks.append(("投信", build_trust_payload))
+    logger.info("抓取大盤總覽...")
+    try:
+        overview = fetch_market_overview()
+    except Exception as e:
+        errors.append(f"大盤總覽: {e}")
+        logger.error("大盤總覽失敗: %s", e)
 
-    for label, build_fn in tasks:
-        logger.info("抓取%s買賣超資料...", label)
+    logger.info("抓取外資排行...")
+    try:
+        foreign_rank = fetch_foreign_rank()
+    except Exception as e:
+        errors.append(f"外資排行: {e}")
+        logger.error("外資排行失敗: %s", e)
+
+    logger.info("抓取投信排行...")
+    try:
+        trust_rank = fetch_trust_rank()
+    except Exception as e:
+        errors.append(f"投信排行: {e}")
+        logger.error("投信排行失敗: %s", e)
+
+    logger.info("抓取族群彙計...")
+    try:
+        sector_data = fetch_sector_institutional()
+    except Exception as e:
+        errors.append(f"族群彙計: {e}")
+        logger.error("族群彙計失敗: %s", e)
+
+    # ── 批次抓 MA 資料 ────────────────────────────────────────────────────────
+    all_stocks = (
+        foreign_rank["twse"]["buy"]  + foreign_rank["twse"]["sell"] +
+        foreign_rank["tpex"]["buy"]  + foreign_rank["tpex"]["sell"] +
+        trust_rank["twse"]["buy"]    + trust_rank["twse"]["sell"] +
+        trust_rank["tpex"]["buy"]    + trust_rank["tpex"]["sell"]
+    )
+    ma_data: dict = {}
+    if all_stocks:
+        logger.info("抓取 MA 資料（%d 支股票）...", len(all_stocks))
         try:
-            payload = build_fn()
-            post_to_webhook(webhook_url, payload)
-        except urllib.error.HTTPError as e:
-            msg = f"{label}報告 Webhook 發送失敗（HTTP {e.code}）: {e.reason}"
-            logger.error(msg)
-            errors.append(msg)
+            ma_data = fetch_ma_data(all_stocks)
         except Exception as e:
-            msg = f"{label}報告失敗: {e}"
-            logger.error(msg)
-            errors.append(msg)
+            logger.warning("MA 資料失敗（不影響主報告）: %s", e)
+
+    date_str = (
+        foreign_rank.get("date")
+        or trust_rank.get("date")
+        or sector_data.get("date", "—")
+    )
+
+    # ── 渲染 PNG ──────────────────────────────────────────────────────────────
+    data = {
+        "date":     date_str,
+        "overview": overview,
+        "foreign":  foreign_rank,
+        "trust":    trust_rank,
+        "sector":   sector_data,
+        "ma_data":  ma_data,
+    }
+
+    logger.info("渲染 PNG 報告...")
+    try:
+        png_bytes = render_report_png(data)
+    except Exception as e:
+        logger.error("PNG 渲染失敗: %s", e)
+        sys.exit(1)
+
+    # ── 發送至 Discord ────────────────────────────────────────────────────────
+    logger.info("發送至 Discord Webhook...")
+    try:
+        post_image_to_webhook(webhook_url, png_bytes)
+    except Exception as e:
+        logger.error("Webhook 發送失敗: %s", e)
+        sys.exit(1)
 
     if errors:
-        logger.error("完成，但有 %d 個錯誤", len(errors))
-        sys.exit(1)
+        logger.warning("完成（部分資料缺失：%s）", "；".join(errors))
     else:
         logger.info("所有報告發送完成")
 
