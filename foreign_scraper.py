@@ -578,13 +578,11 @@ def _fetch_taiex_index() -> dict | None:
 def _fetch_bfi82u() -> dict | None:
     """
     上市三大法人買賣超金額（億元）。
-    來源：TWSE BFI82U（外資 / 投信 / 自營商合計行）。
-    BFI82U 資料列示：
-      外資及陸資(不含自營商) / 外資及陸資自營商 / 外資及陸資（合計）
-      投信
-      自營商(自行買賣) / 自營商(避險) / 自營商（合計）
-      三大法人
-    → 只取合計行（不含括號的行），金額單位：元，/ 1e8 → 億。
+    來源：TWSE BFI82U。金額單位：元，/ 1e8 → 億。
+
+    優先取合計行（不含括號的行），若無則累計子行加總：
+      外資及陸資(不含自營商) + 外資及陸資自營商 = 外資及陸資合計
+      自營商(自行買賣) + 自營商(避險) = 自營商合計
     """
     try:
         j = _get_json(
@@ -602,25 +600,44 @@ def _fetch_bfi82u() -> dict | None:
                 break
 
         result: dict[str, float] = {}
+        foreign_raw_sum: float = 0.0   # 子行備用
+        dealer_raw_sum:  float = 0.0   # 子行備用
+
         for row in j.get("data", []):
             name = str(row[0]).strip()
             try:
                 raw = float(str(row[net_idx]).replace(",", ""))
             except (ValueError, IndexError):
                 continue
-            net_b = round(raw / 1e8, 1)   # 元 → 億
 
-            # 外資合計行：含「外資及陸資」但排除子分類（不含…、自營）
-            if "外資及陸資" in name and "不含" not in name and "自營" not in name:
-                result["foreign"] = net_b
+            logger.debug("[bfi82u] 列名=%s  淨額=%s", name, raw)
+
+            if "外資及陸資" in name:
+                if "不含" not in name and "自營" not in name:
+                    result["foreign"] = round(raw / 1e8, 1)   # 合計行（優先）
+                else:
+                    foreign_raw_sum += raw                      # 子行備用累計
             elif name == "投信":
-                result["trust"] = net_b
-            # 自營商合計行：含「自營商」但排除子分類（括號版本）
-            elif "自營商" in name and "(" not in name and "（" not in name:
-                result["dealer"] = net_b
+                result["trust"] = round(raw / 1e8, 1)
+            elif "自營商" in name:
+                if "(" not in name and "（" not in name:
+                    result["dealer"] = round(raw / 1e8, 1)     # 合計行（優先）
+                else:
+                    dealer_raw_sum += raw                       # 子行備用累計
+
+        # 若無合計行，改用子行加總
+        if "foreign" not in result and foreign_raw_sum != 0.0:
+            result["foreign"] = round(foreign_raw_sum / 1e8, 1)
+            logger.info("[bfi82u] 外資使用子行加總: %.1f億", result["foreign"])
+        if "dealer" not in result and dealer_raw_sum != 0.0:
+            result["dealer"] = round(dealer_raw_sum / 1e8, 1)
+            logger.info("[bfi82u] 自營使用子行加總: %.1f億", result["dealer"])
 
         if result:
             result["total"] = round(sum(result.values()), 1)
+            logger.info("[bfi82u] 外資=%.1f  投信=%.1f  自營=%.1f  合計=%.1f",
+                        result.get("foreign", 0), result.get("trust", 0),
+                        result.get("dealer", 0), result["total"])
             return result
     except Exception as e:
         logger.warning("[bfi82u] 失敗: %s", e)
