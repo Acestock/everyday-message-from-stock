@@ -15,7 +15,7 @@ import json
 import logging
 import threading
 import urllib.request
-from datetime import date
+from datetime import date, timedelta
 from typing import Optional
 
 import pandas as pd
@@ -31,13 +31,17 @@ _lock = threading.Lock()
 _all_raw_cache: Optional[dict] = None
 _all_raw_cache_date: Optional[str] = None
 
+# 歷史快照快取（date_key → snapshot dict）
+_hist_cache: dict[str, Optional[dict]] = {}
+
 # 產業類別 mapping 快取
 _industry_map: dict[str, str] = {}
 _industry_map_date: Optional[str] = None
 
-TOP_N        = 10
-TOP_SECTOR   = 10   # 族群買超/賣超顯示前 N 個產業
-TOP_ACTIVE   = 20   # 外資投信雙買超個股最多顯示筆數
+TOP_N           = 10
+TOP_SECTOR      = 10   # 族群買超/賣超顯示前 N 個產業
+TOP_ACTIVE      = 20   # 外資投信雙買超個股最多顯示筆數
+MAX_STREAK_DAYS = 5    # 連續天數最多追溯幾個前交易日
 TIMEOUT = 12
 
 _UA = (
@@ -394,6 +398,178 @@ def _build_rank(all_stocks: list[dict], data_date: str) -> dict:
     twse = [s for s in all_stocks if s["market"] == "上市"]
     tpex = [s for s in all_stocks if s["market"] == "上櫃"]
     return {"date": data_date, "twse": _split(twse), "tpex": _split(tpex)}
+
+
+# ── 歷史資料（連續天數標記）────────────────────────────────────────────────────
+
+def _prev_weekdays(n: int) -> list[date]:
+    """回傳今日之前 n 個工作日（週一〜週五）的日期，最近的在前。"""
+    result: list[date] = []
+    d = date.today()
+    while len(result) < n:
+        d -= timedelta(days=1)
+        if d.weekday() < 5:   # 0=Mon … 4=Fri
+            result.append(d)
+    return result
+
+
+def _fetch_twse_t86_for_date(dt: date) -> tuple[list[dict], list[dict]]:
+    """抓取指定日期的 TWSE T86（外資 + 投信同一支 API）。"""
+    url = (
+        "https://www.twse.com.tw/rwd/zh/fund/T86"
+        f"?response=json&date={dt.strftime('%Y%m%d')}&selectType=ALLBUT0999"
+    )
+    try:
+        j = _get_json(url)
+        if j.get("stat") != "OK":
+            return [], []
+        fields = j.get("fields", [])
+        data   = j.get("data",   [])
+        try:
+            f_idx = fields.index(_TWSE_COL["foreign"])
+        except ValueError:
+            f_idx = _TWSE_FALLBACK_IDX["foreign"]
+        try:
+            t_idx = fields.index(_TWSE_COL["trust"])
+        except ValueError:
+            t_idx = _TWSE_FALLBACK_IDX["trust"]
+
+        foreign_list: list[dict] = []
+        trust_list:   list[dict] = []
+        for row in data:
+            try:
+                code = str(row[0]).strip()
+                name = str(row[1]).strip()
+                fnet = round(_clean_num(row[f_idx]) / 1000)
+                tnet = round(_clean_num(row[t_idx]) / 1000)
+                if fnet != 0:
+                    foreign_list.append({"code": code, "name": name,
+                                         "net_k": fnet, "market": "上市"})
+                if tnet != 0:
+                    trust_list.append({"code": code, "name": name,
+                                       "net_k": tnet, "market": "上市"})
+            except (IndexError, ValueError, TypeError):
+                continue
+        return foreign_list, trust_list
+    except Exception as e:
+        logger.debug("[hist_twse] %s 失敗: %s", dt, e)
+        return [], []
+
+
+def _fetch_tpex_for_date(dt: date) -> tuple[list[dict], list[dict]]:
+    """抓取指定日期的 TPEx 三大法人（外資 + 投信）。"""
+    roc = f"{dt.year - 1911}/{dt.month:02d}/{dt.day:02d}"
+    url = (
+        "https://www.tpex.org.tw/web/stock/3insti/daily_trade/"
+        f"3itrade_hedge_result.php?l=zh-tw&t=D&d={roc}&se=EW&o=json"
+    )
+    referer = "https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge.php?l=zh-tw"
+    try:
+        j     = _get_json(url, referer=referer)
+        table = (j.get("tables") or [{}])[0]
+        rows  = table.get("data", [])
+        if not rows:
+            return [], []
+        foreign_list: list[dict] = []
+        trust_list:   list[dict] = []
+        for row in rows:
+            try:
+                code = str(row[0]).strip()
+                name = str(row[1]).strip()
+                fnet = round(_clean_num(row[10]) / 1000)
+                tnet = round(_clean_num(row[13]) / 1000)
+                if fnet != 0:
+                    foreign_list.append({"code": code, "name": name,
+                                         "net_k": fnet, "market": "上櫃"})
+                if tnet != 0:
+                    trust_list.append({"code": code, "name": name,
+                                       "net_k": tnet, "market": "上櫃"})
+            except (IndexError, ValueError, TypeError):
+                continue
+        return foreign_list, trust_list
+    except Exception as e:
+        logger.debug("[hist_tpex] %s 失敗: %s", dt, e)
+        return [], []
+
+
+def _build_snapshot(dt: date) -> Optional[dict]:
+    """
+    建立指定日期的排行快照（不含 ETF 的 Top N buy/sell code 集合）。
+    非交易日回傳 None。
+    """
+    def _top_sets(stocks: list[dict]) -> tuple[set, set]:
+        stocks = [s for s in stocks if not _is_etf(s["code"])]
+        buy_codes = {s["code"] for s in
+                     sorted([s for s in stocks if s["net_k"] > 0],
+                            key=lambda x: x["net_k"], reverse=True)[:TOP_N]}
+        sell_codes = {s["code"] for s in
+                      sorted([s for s in stocks if s["net_k"] < 0],
+                             key=lambda x: x["net_k"])[:TOP_N]}
+        return buy_codes, sell_codes
+
+    twse_f, twse_t = _fetch_twse_t86_for_date(dt)
+    tpex_f, tpex_t = _fetch_tpex_for_date(dt)
+
+    if not (twse_f or twse_t or tpex_f or tpex_t):
+        return None   # 非交易日或資料尚未公布
+
+    fb, fs = _top_sets(twse_f + tpex_f)
+    tb, ts = _top_sets(twse_t + tpex_t)
+    return {
+        "foreign_buy":  fb,
+        "foreign_sell": fs,
+        "trust_buy":    tb,
+        "trust_sell":   ts,
+    }
+
+
+def _get_hist_snapshots() -> list[Optional[dict]]:
+    """回傳前 MAX_STREAK_DAYS 個交易日的快照列表（今日→過去排列）。"""
+    prev_days = _prev_weekdays(MAX_STREAK_DAYS)
+    result: list[Optional[dict]] = []
+    for d in prev_days:
+        key = d.strftime("%Y-%m-%d")
+        with _lock:
+            if key in _hist_cache:
+                result.append(_hist_cache[key])
+                continue
+        snap = _build_snapshot(d)
+        with _lock:
+            _hist_cache[key] = snap
+        result.append(snap)
+    return result
+
+
+def _annotate_streaks(rank: dict, kind: str,
+                      snapshots: list[Optional[dict]]) -> None:
+    """
+    為 rank 中每筆股票加上 streak（連續天數）和 prev_dir（昨買/昨賣）。
+    kind: "foreign" | "trust"
+    """
+    buy_key  = f"{kind}_buy"
+    sell_key = f"{kind}_sell"
+
+    for market in ("twse", "tpex"):
+        for side in ("buy", "sell"):
+            same_key = buy_key  if side == "buy" else sell_key
+            opp_key  = sell_key if side == "buy" else buy_key
+            for stock in rank[market][side]:
+                code = stock["code"]
+                streak   = 0
+                prev_dir = None
+                for snap in snapshots:
+                    if snap is None:
+                        break
+                    if code in snap.get(same_key, set()):
+                        streak += 1
+                    elif code in snap.get(opp_key, set()):
+                        if streak == 0:
+                            prev_dir = "昨賣" if side == "buy" else "昨買"
+                        break
+                    else:
+                        break
+                stock["streak"]   = streak
+                stock["prev_dir"] = prev_dir
 
 
 # ── 公開 API ───────────────────────────────────────────────────────────────────
@@ -850,17 +1026,29 @@ def fetch_market_overview() -> dict:
 
 
 def fetch_foreign_rank() -> dict:
-    """外資買賣超排行（上市 + 上櫃 Top 10）。"""
+    """外資買賣超排行（上市 + 上櫃 Top 10），含連續天數標記。"""
     raw = _fetch_all_raw()
     all_stocks = raw["twse_foreign"] + raw["tpex_foreign"]
-    return _build_rank(all_stocks, raw["date"])
+    rank = _build_rank(all_stocks, raw["date"])
+    try:
+        snaps = _get_hist_snapshots()
+        _annotate_streaks(rank, "foreign", snaps)
+    except Exception as e:
+        logger.warning("[streak] 外資連續天數計算失敗: %s", e)
+    return rank
 
 
 def fetch_trust_rank() -> dict:
-    """投信買賣超排行（上市 + 上櫃 Top 10）。"""
+    """投信買賣超排行（上市 + 上櫃 Top 10），含連續天數標記。"""
     raw = _fetch_all_raw()
     all_stocks = raw["twse_trust"] + raw["tpex_trust"]
-    return _build_rank(all_stocks, raw["date"])
+    rank = _build_rank(all_stocks, raw["date"])
+    try:
+        snaps = _get_hist_snapshots()
+        _annotate_streaks(rank, "trust", snaps)
+    except Exception as e:
+        logger.warning("[streak] 投信連續天數計算失敗: %s", e)
+    return rank
 
 
 def fetch_institutional_active() -> dict:
