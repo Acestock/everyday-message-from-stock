@@ -414,9 +414,13 @@ def _prev_weekdays(n: int) -> list[date]:
 
 
 def _fetch_twse_t86_for_date(dt: date) -> tuple[list[dict], list[dict]]:
-    """抓取指定日期的 TWSE T86（外資 + 投信同一支 API）。"""
+    """
+    抓取指定日期的 TWSE T86（外資 + 投信同一支 API）。
+    使用舊端點（非 rwd/zh），確保 date= 參數有效支援歷史查詢。
+    舊端點欄位索引：foreign=4, trust=7（與 _TWSE_FALLBACK_IDX 相同）。
+    """
     url = (
-        "https://www.twse.com.tw/rwd/zh/fund/T86"
+        "https://www.twse.com.tw/fund/T86"
         f"?response=json&date={dt.strftime('%Y%m%d')}&selectType=ALLBUT0999"
     )
     try:
@@ -511,10 +515,13 @@ def _build_snapshot(dt: date) -> Optional[dict]:
     tpex_f, tpex_t = _fetch_tpex_for_date(dt)
 
     if not (twse_f or twse_t or tpex_f or tpex_t):
-        return None   # 非交易日或資料尚未公布
+        logger.info("[snapshot] %s 無資料（非交易日）", dt)
+        return None
 
     fb, fs = _top_sets(twse_f + tpex_f)
     tb, ts = _top_sets(twse_t + tpex_t)
+    logger.info("[snapshot] %s  外資buy=%d sell=%d  投信buy=%d sell=%d",
+                dt, len(fb), len(fs), len(tb), len(ts))
     return {
         "foreign_buy":  fb,
         "foreign_sell": fs,
