@@ -774,6 +774,7 @@ def _fetch_bfi82u() -> dict | None:
             if "買賣超" in str(f):
                 net_idx = i
                 break
+        logger.info("[bfi82u] fields=%s  net_idx=%d", fields, net_idx)
 
         result: dict[str, float] = {}
         foreign_raw_sum: float = 0.0   # 子行備用
@@ -786,7 +787,9 @@ def _fetch_bfi82u() -> dict | None:
             except (ValueError, IndexError):
                 continue
 
-            logger.debug("[bfi82u] 列名=%s  淨額=%s", name, raw)
+            # 把所有自營商相關列完整印出，方便確認欄位對應
+            if "自營" in name:
+                logger.info("[bfi82u] 自營行: name=%r  全列=%s", name, row)
 
             if "外資及陸資" in name:
                 if "不含" not in name and "自營" not in name:
