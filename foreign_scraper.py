@@ -125,10 +125,16 @@ def _fetch_twse_base(kind: str) -> tuple[list[dict], str]:
             return [], ""
 
         raw_date = j.get("date", "")
-        date_str = (
-            f"{raw_date[:4]}/{raw_date[4:6]}/{raw_date[6:]}"
-            if len(raw_date) == 8 else ""
-        )
+        if len(raw_date) == 8:
+            # CE 西元格式：YYYYMMDD
+            date_str = f"{raw_date[:4]}/{raw_date[4:6]}/{raw_date[6:]}"
+        elif len(raw_date) == 7:
+            # 民國格式：YYYMMDD（3 碼民國年）
+            ce_year  = int(raw_date[:3]) + 1911
+            date_str = f"{ce_year}/{raw_date[3:5]}/{raw_date[5:]}"
+        else:
+            date_str = ""
+        logger.info("[%s] TWSE raw_date=%r → date_str=%s", kind, raw_date, date_str)
 
         fields = j.get("fields", [])
         data   = j.get("data",   [])
@@ -269,7 +275,9 @@ def _fetch_all_raw() -> dict:
     twse_f, twse_date       = _fetch_twse_base("foreign")
     twse_t, _               = _fetch_twse_base("trust")
     tpex_f, tpex_t, tpex_d = _fetch_tpex_3insti()
-    data_date = twse_date or tpex_d or today.replace("-", "/")
+    # 只在 TPEx 有實際資料時才採用其日期，避免空回應裡的預設舊日期污染顯示
+    tpex_date_valid = tpex_d if (tpex_f or tpex_t) else ""
+    data_date = twse_date or tpex_date_valid or today.replace("-", "/")
 
     result = {
         "date":         data_date,
