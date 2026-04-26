@@ -823,21 +823,15 @@ def _fetch_bfi82u() -> dict | None:
 def _fetch_tpex_institutional() -> dict | None:
     """
     上櫃三大法人買賣超金額（億元）。
-    來源：TPEX OpenAPI tpex_3insti_summary_bu（回傳千元，/ 1e5 → 億）。
+    嘗試多個 TPEX 端點，任一成功即回傳。
     """
-    try:
-        j = _get_json("https://www.tpex.org.tw/openapi/v1/tpex_3insti_summary_bu")
-        if not isinstance(j, list) or not j:
+    def _to_yi(s) -> float | None:
+        try:
+            return round(int(str(s).replace(",", "").replace("+", "").strip()) / 1e5, 1)
+        except (ValueError, TypeError):
             return None
-        latest = j[-1]   # 最新一筆（清單按日期遞增排列）
-        logger.info("[tpex_insti] 欄位：%s", list(latest.keys()))
 
-        def _to_yi(s) -> float | None:
-            try:
-                return round(int(str(s).replace(",", "").replace("+", "").strip()) / 1e5, 1)
-            except (ValueError, TypeError):
-                return None
-
+    def _parse(latest: dict) -> dict:
         result: dict[str, float] = {}
         for key, val in latest.items():
             v = _to_yi(val)
@@ -850,17 +844,54 @@ def _fetch_tpex_institutional() -> dict | None:
                 result["trust"] = v
             elif "自營商" in key and "淨" in key and "(" not in key and "（" not in key:
                 result["dealer"] = v
-            # 英文欄位 fallback
             elif "foreign" in kl and "net" in kl and "trust" not in kl and "dealer" not in kl:
                 result.setdefault("foreign", v)
-            elif ("trust" in kl and "net" in kl) and "foreign" not in kl:
+            elif "trust" in kl and "net" in kl and "foreign" not in kl:
                 result.setdefault("trust", v)
             elif "dealer" in kl and "net" in kl:
                 result.setdefault("dealer", v)
+        return result
 
-        return result if result else None
+    candidate_urls = [
+        "https://www.tpex.org.tw/openapi/v1/tpex_3insti_summary_bu",
+        "https://www.tpex.org.tw/openapi/v1/ch/tpex_3insti_summary_bu",
+        "https://openapi.tpex.org.tw/v1/tpex_3insti_summary_bu",
+    ]
+    for url in candidate_urls:
+        try:
+            j = _get_json(url)
+            if not isinstance(j, list) or not j:
+                logger.info("[tpex_insti] %s → 空回應", url.split("/")[-1])
+                continue
+            latest = j[-1]
+            logger.info("[tpex_insti] 欄位：%s", list(latest.keys()))
+            result = _parse(latest)
+            if result:
+                logger.info("[tpex_insti] 外資=%.1f  投信=%.1f  自營=%.1f",
+                            result.get("foreign", 0), result.get("trust", 0),
+                            result.get("dealer", 0))
+                return result
+            logger.info("[tpex_insti] 欄位解析無結果，繼續嘗試下一端點")
+        except Exception as e:
+            logger.info("[tpex_insti] %s 失敗: %s", url.split("/")[-1], e)
+
+    # 最後備援：直接從當日 _fetch_tpex_3insti() 的原始資料加總
+    try:
+        raw = _fetch_all_raw()
+        f_list = raw.get("tpex_foreign", [])
+        t_list = raw.get("tpex_trust",   [])
+        if f_list or t_list:
+            foreign_sum = round(sum(s["net_k"] for s in f_list) / 100, 1)  # 張 → 億（估算）
+            trust_sum   = round(sum(s["net_k"] for s in t_list) / 100, 1)
+            result = {}
+            if f_list: result["foreign"] = foreign_sum
+            if t_list: result["trust"]   = trust_sum
+            logger.info("[tpex_insti] 備援加總 外資=%.1f  投信=%.1f", foreign_sum, trust_sum)
+            return result if result else None
     except Exception as e:
-        logger.warning("[tpex_insti] 失敗: %s", e)
+        logger.debug("[tpex_insti] 備援加總失敗: %s", e)
+
+    logger.warning("[tpex_insti] 所有端點均失敗")
     return None
 
 
