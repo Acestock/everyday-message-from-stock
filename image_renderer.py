@@ -113,6 +113,21 @@ body {
 .ma-wrap { font-size: 11px; width: 70px; flex-shrink: 0; font-weight: 700; }
 .no-data { color: #8c959f; font-style: italic; font-size: 12px; padding: 4px 0; }
 
+/* ── 連續天數標記 ── */
+.streak-cnt {
+  font-size: 10px; font-weight: 700; color: #9a6700;
+  background: #fff8c5; border: 1px solid #d4a72c;
+  border-radius: 3px; padding: 0 3px; margin-left: 2px;
+  white-space: nowrap; flex-shrink: 0;
+}
+.streak-flip {
+  font-size: 10px; font-weight: 700;
+  border-radius: 3px; padding: 0 3px; margin-left: 2px;
+  white-space: nowrap; flex-shrink: 0;
+}
+.streak-flip.pos { color: #cf222e; background: #ffebe9; border: 1px solid #ffcecb; }
+.streak-flip.neg { color: #1a7f37; background: #dafbe1; border: 1px solid #b7efca; }
+
 /* ── 族群彙計 ── */
 .sc-grid   { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .sec-title { font-size: 11px; font-weight: 700; color: #57606a;
@@ -145,11 +160,25 @@ def _stock_rows(stocks: list[dict], ma_data: dict, color: str) -> str:
         info  = ma_data.get(s["code"])
         price = f'${info["price"]}' if info and info.get("price") else ""
         ma    = _ma_html(info)
+
+        # 連續天數 / 反轉標記
+        streak   = s.get("streak", 0)
+        prev_dir = s.get("prev_dir")
+        if prev_dir:
+            # 昨賣→今買（正面轉折）紅；昨買→今賣（負面轉折）綠
+            flip_cls = "pos" if prev_dir == "昨賣" else "neg"
+            badge = f'<span class="streak-flip {flip_cls}">{prev_dir}</span>'
+        elif streak:
+            badge = f'<span class="streak-cnt">{streak}d</span>'
+        else:
+            badge = ""
+
         rows.append(
             f'<div class="srow">'
             f'<span class="rn">{i}.</span>'
             f'<span class="sname">{_html.escape(s["name"])}'
             f'<span class="scode"> ({s["code"]})</span></span>'
+            f'{badge}'
             f'<span class="net {color}">{_fmt_k(s["net_k"])}張</span>'
             f'<span class="price">{price}</span>'
             f'<span class="ma-wrap">{ma}</span>'
