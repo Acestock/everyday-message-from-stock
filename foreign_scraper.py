@@ -796,9 +796,13 @@ def _fetch_bfi82u() -> dict | None:
                     result["foreign"] = round(raw / 1e8, 1)   # 合計行（優先）
                 else:
                     foreign_raw_sum += raw                      # 子行備用累計
+            elif name == "外資自營商":
+                # 外資的自營桌，屬於外資合計的一部分，不是自營商機構
+                foreign_raw_sum += raw
             elif name == "投信":
                 result["trust"] = round(raw / 1e8, 1)
-            elif "自營商" in name:
+            elif "自營商" in name and "外資" not in name:
+                # 排除 "外資自營商"，只處理真正的自營商機構行
                 if "(" not in name and "（" not in name:
                     result["dealer"] = round(raw / 1e8, 1)     # 合計行（優先）
                 else:
@@ -878,23 +882,7 @@ def _fetch_tpex_institutional() -> dict | None:
         except Exception as e:
             logger.info("[tpex_insti] %s 失敗: %s", url.split("/")[-1], e)
 
-    # 最後備援：直接從當日 _fetch_tpex_3insti() 的原始資料加總
-    try:
-        raw = _fetch_all_raw()
-        f_list = raw.get("tpex_foreign", [])
-        t_list = raw.get("tpex_trust",   [])
-        if f_list or t_list:
-            foreign_sum = round(sum(s["net_k"] for s in f_list) / 100, 1)  # 張 → 億（估算）
-            trust_sum   = round(sum(s["net_k"] for s in t_list) / 100, 1)
-            result = {}
-            if f_list: result["foreign"] = foreign_sum
-            if t_list: result["trust"]   = trust_sum
-            logger.info("[tpex_insti] 備援加總 外資=%.1f  投信=%.1f", foreign_sum, trust_sum)
-            return result if result else None
-    except Exception as e:
-        logger.debug("[tpex_insti] 備援加總失敗: %s", e)
-
-    logger.warning("[tpex_insti] 所有端點均失敗")
+    logger.warning("[tpex_insti] 所有端點均失敗，上櫃三大法人資料無法取得")
     return None
 
 
