@@ -106,13 +106,11 @@ def _today_roc() -> str:
 
 def _fetch_twse_base(kind: str) -> tuple[list[dict], str]:
     """
-    從 TWSE T86 抓取指定法人的買賣超。
-    kind: "foreign" → 外陸資買賣超  |  "trust" → 投信買賣超
-    回傳 ([{code,name,net_k,market}], date_str)。
+    從 TWSE T86 抓取指定法人的買賣超（單次呼叫版，僅保留供向下相容）。
+    正式流程改用 _fetch_twse_t86_both()，兩法人同一次請求解析，避免 CDN 快取不一致。
     """
-    col_name    = _TWSE_COL[kind]
+    col_name     = _TWSE_COL[kind]
     fallback_idx = _TWSE_FALLBACK_IDX[kind]
-
     url = (
         "https://www.twse.com.tw/rwd/zh/fund/T86"
         "?response=json&date=&selectType=ALLBUT0999"
@@ -126,19 +124,15 @@ def _fetch_twse_base(kind: str) -> tuple[list[dict], str]:
 
         raw_date = j.get("date", "")
         if len(raw_date) == 8:
-            # CE 西元格式：YYYYMMDD
             date_str = f"{raw_date[:4]}/{raw_date[4:6]}/{raw_date[6:]}"
         elif len(raw_date) == 7:
-            # 民國格式：YYYMMDD（3 碼民國年）
             ce_year  = int(raw_date[:3]) + 1911
             date_str = f"{ce_year}/{raw_date[3:5]}/{raw_date[5:]}"
         else:
             date_str = ""
-        logger.info("[%s] TWSE raw_date=%r → date_str=%s", kind, raw_date, date_str)
 
         fields = j.get("fields", [])
         data   = j.get("data",   [])
-
         try:
             net_idx = fields.index(col_name)
         except ValueError:
@@ -147,10 +141,10 @@ def _fetch_twse_base(kind: str) -> tuple[list[dict], str]:
         result = []
         for row in data:
             try:
-                code     = str(row[0]).strip()
-                name     = str(row[1]).strip()
+                code      = str(row[0]).strip()
+                name      = str(row[1]).strip()
                 net_share = _clean_num(row[net_idx])
-                net_k    = round(net_share / 1000)    # 股 → 張
+                net_k     = round(net_share / 1000)
                 if net_k == 0:
                     continue
                 result.append({"code": code, "name": name,
@@ -158,11 +152,75 @@ def _fetch_twse_base(kind: str) -> tuple[list[dict], str]:
             except (IndexError, ValueError, TypeError):
                 continue
 
-        logger.info("[%s] TWSE 上市：%d 筆，日期 %s", kind, len(result), date_str)
         return result, date_str
 
     except Exception as e:
         logger.warning("[%s] TWSE 抓取失敗: %s", kind, e)
+        return [], ""
+
+
+def _fetch_twse_t86_both() -> tuple[list[dict], list[dict], str]:
+    """
+    一次 HTTP 請求同時解析外資與投信，避免兩次分開請求被 CDN 分流到
+    不同快取節點而拿到不一致的日期 / 資料。
+    回傳 (foreign_list, trust_list, date_str)。
+    """
+    url = (
+        "https://www.twse.com.tw/rwd/zh/fund/T86"
+        "?response=json&date=&selectType=ALLBUT0999"
+    )
+    try:
+        j    = _get_json(url)
+        stat = j.get("stat", "")
+        if stat != "OK":
+            logger.info("[T86] TWSE stat=%s（可能非交易日）", stat)
+            return [], [], ""
+
+        raw_date = j.get("date", "")
+        if len(raw_date) == 8:
+            date_str = f"{raw_date[:4]}/{raw_date[4:6]}/{raw_date[6:]}"
+        elif len(raw_date) == 7:
+            ce_year  = int(raw_date[:3]) + 1911
+            date_str = f"{ce_year}/{raw_date[3:5]}/{raw_date[5:]}"
+        else:
+            date_str = ""
+        logger.info("[T86] raw_date=%r → date_str=%s", raw_date, date_str)
+
+        fields = j.get("fields", [])
+        data   = j.get("data",   [])
+        try:
+            f_idx = fields.index(_TWSE_COL["foreign"])
+        except ValueError:
+            f_idx = _TWSE_FALLBACK_IDX["foreign"]
+        try:
+            t_idx = fields.index(_TWSE_COL["trust"])
+        except ValueError:
+            t_idx = _TWSE_FALLBACK_IDX["trust"]
+
+        foreign_list: list[dict] = []
+        trust_list:   list[dict] = []
+        for row in data:
+            try:
+                code = str(row[0]).strip()
+                name = str(row[1]).strip()
+                fnet = round(_clean_num(row[f_idx]) / 1000)
+                tnet = round(_clean_num(row[t_idx]) / 1000)
+                if fnet != 0:
+                    foreign_list.append({"code": code, "name": name,
+                                         "net_k": fnet, "market": "上市"})
+                if tnet != 0:
+                    trust_list.append({"code": code, "name": name,
+                                       "net_k": tnet, "market": "上市"})
+            except (IndexError, ValueError, TypeError):
+                continue
+
+        logger.info("[T86] 上市 foreign=%d trust=%d 日期=%s",
+                    len(foreign_list), len(trust_list), date_str)
+        return foreign_list, trust_list, date_str
+
+    except Exception as e:
+        logger.warning("[T86] TWSE 抓取失敗: %s", e)
+        return [], [], ""
         return [], ""
 
 
@@ -272,9 +330,8 @@ def _fetch_all_raw() -> dict:
         if _all_raw_cache_date == today and _all_raw_cache:
             return _all_raw_cache
 
-    twse_f, twse_date       = _fetch_twse_base("foreign")
-    twse_t, _               = _fetch_twse_base("trust")
-    tpex_f, tpex_t, tpex_d = _fetch_tpex_3insti()
+    twse_f, twse_t, twse_date = _fetch_twse_t86_both()
+    tpex_f, tpex_t, tpex_d   = _fetch_tpex_3insti()
     # 只在 TPEx 有實際資料時才採用其日期，避免空回應裡的預設舊日期污染顯示
     tpex_date_valid = tpex_d if (tpex_f or tpex_t) else ""
     data_date = twse_date or tpex_date_valid or today.replace("-", "/")
