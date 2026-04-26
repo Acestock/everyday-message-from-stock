@@ -494,6 +494,17 @@ def _prev_weekdays(n: int) -> list[date]:
     return result
 
 
+def _prev_weekdays_before(ref: date, n: int) -> list[date]:
+    """回傳 ref 日期（不含）之前 n 個工作日，最近的在前。"""
+    result: list[date] = []
+    d = ref
+    while len(result) < n:
+        d -= timedelta(days=1)
+        if d.weekday() < 5:
+            result.append(d)
+    return result
+
+
 def _fetch_twse_t86_for_date(dt: date) -> tuple[list[dict], list[dict]]:
     """
     抓取指定日期的 TWSE T86（外資 + 投信同一支 API）。
@@ -640,9 +651,13 @@ def _build_snapshot(dt: date) -> Optional[dict]:
     }
 
 
-def _get_hist_snapshots() -> list[Optional[dict]]:
-    """回傳前 MAX_STREAK_DAYS 個交易日的快照列表（今日→過去排列）。"""
-    prev_days = _prev_weekdays(MAX_STREAK_DAYS)
+def _get_hist_snapshots(data_date: date) -> list[Optional[dict]]:
+    """
+    回傳 data_date 之前 MAX_STREAK_DAYS 個交易日的快照列表（最近的在前）。
+    使用 data_date（資料日期）而非 date.today()，確保快照不包含資料本身那天。
+    例如今天週日、資料是週五 → 快照從週四起算，不誤把週五算進連續天數。
+    """
+    prev_days = _prev_weekdays_before(data_date, MAX_STREAK_DAYS)
     result: list[Optional[dict]] = []
     for d in prev_days:
         key = d.strftime("%Y-%m-%d")
@@ -1164,13 +1179,20 @@ def fetch_market_overview() -> dict:
     }
 
 
+def _parse_data_date(date_str: str) -> date:
+    """將 'YYYY/MM/DD' 或 'YYYY-MM-DD' 轉為 date 物件。"""
+    parts = date_str.replace("-", "/").split("/")
+    return date(int(parts[0]), int(parts[1]), int(parts[2]))
+
+
 def fetch_foreign_rank() -> dict:
     """外資買賣超排行（上市 + 上櫃 Top 10），含連續天數標記。"""
     raw = _fetch_all_raw()
     all_stocks = raw["twse_foreign"] + raw["tpex_foreign"]
     rank = _build_rank(all_stocks, raw["date"])
     try:
-        snaps = _get_hist_snapshots()
+        data_date = _parse_data_date(raw["date"])
+        snaps = _get_hist_snapshots(data_date)
         _annotate_streaks(rank, "foreign", snaps)
     except Exception as e:
         logger.warning("[streak] 外資連續天數計算失敗: %s", e)
@@ -1183,7 +1205,8 @@ def fetch_trust_rank() -> dict:
     all_stocks = raw["twse_trust"] + raw["tpex_trust"]
     rank = _build_rank(all_stocks, raw["date"])
     try:
-        snaps = _get_hist_snapshots()
+        data_date = _parse_data_date(raw["date"])
+        snaps = _get_hist_snapshots(data_date)
         _annotate_streaks(rank, "trust", snaps)
     except Exception as e:
         logger.warning("[streak] 投信連續天數計算失敗: %s", e)
