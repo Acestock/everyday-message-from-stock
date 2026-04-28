@@ -81,6 +81,29 @@ def post_image_to_webhook(webhook_url: str, png_bytes: bytes) -> None:
         raise
 
 
+def _mark_dual_institutional(foreign_rank: dict, trust_rank: dict) -> None:
+    """在同時出現於外資與投信任一清單的個股上標記 dual=True（顯示橘色名稱）。"""
+    foreign_codes: set[str] = set()
+    trust_codes: set[str] = set()
+    for side in ("buy", "sell"):
+        for market in ("twse", "tpex"):
+            for s in foreign_rank.get(market, {}).get(side, []):
+                foreign_codes.add(s["code"])
+            for s in trust_rank.get(market, {}).get(side, []):
+                trust_codes.add(s["code"])
+    dual = foreign_codes & trust_codes
+    if not dual:
+        return
+    for side in ("buy", "sell"):
+        for market in ("twse", "tpex"):
+            for s in foreign_rank.get(market, {}).get(side, []):
+                if s["code"] in dual:
+                    s["dual"] = True
+            for s in trust_rank.get(market, {}).get(side, []):
+                if s["code"] in dual:
+                    s["dual"] = True
+
+
 def main() -> None:
     webhook_url = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
     if not webhook_url:
@@ -121,6 +144,8 @@ def main() -> None:
     except Exception as e:
         errors.append(f"族群彙計: {e}")
         logger.error("族群彙計失敗: %s", e)
+
+    _mark_dual_institutional(foreign_rank, trust_rank)
 
     # ── 批次抓 MA 資料 ────────────────────────────────────────────────────────
     all_stocks = (

@@ -106,6 +106,7 @@ body {
 .rn    { color: #8c959f; width: 22px; flex-shrink: 0; font-size: 11.5px; }
 .sname { font-weight: 700; color: #1f2328; flex: 1; min-width: 0;
          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sname.dual { color: #e07000; }
 .scode { color: #57606a; font-size: 10.5px; font-weight: 400; }
 .net   { font-weight: 700; width: 56px; text-align: right; flex-shrink: 0; font-size: 12.5px; }
 .price { color: #0550ae; font-size: 13.5px; font-weight: 700;
@@ -173,10 +174,11 @@ def _stock_rows(stocks: list[dict], ma_data: dict, color: str) -> str:
         else:
             badge = ""
 
+        dual_cls = " dual" if s.get("dual") else ""
         rows.append(
             f'<div class="srow">'
             f'<span class="rn">{i}.</span>'
-            f'<span class="sname">{_html.escape(s["name"])}'
+            f'<span class="sname{dual_cls}">{_html.escape(s["name"])}'
             f'<span class="scode"> ({s["code"]})</span></span>'
             f'{badge}'
             f'<span class="net {color}">{_fmt_k(s["net_k"])}張</span>'
