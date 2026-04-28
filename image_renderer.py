@@ -106,10 +106,14 @@ body {
 .rn    { color: #8c959f; width: 22px; flex-shrink: 0; font-size: 11.5px; }
 .sname { font-weight: 700; color: #1f2328; flex: 1; min-width: 0;
          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sname.dual-buy  { color: #e07000; }   /* 外資+投信雙買超 */
+.sname.dual-sell { color: #0a5c2e; }   /* 外資+投信雙賣超 */
+.sname.dual-mixed { color: #0550ae; }  /* 外資/投信一買一賣 */
 .scode { color: #57606a; font-size: 10.5px; font-weight: 400; }
 .net   { font-weight: 700; width: 56px; text-align: right; flex-shrink: 0; font-size: 12.5px; }
-.price { color: #0550ae; font-size: 13.5px; font-weight: 700;
-         width: 58px; text-align: right; flex-shrink: 0; }
+.price { color: #0550ae; font-size: 12.5px; font-weight: 700;
+         width: 52px; text-align: right; flex-shrink: 0; }
+.chg   { font-size: 11.5px; font-weight: 700; width: 46px; text-align: right; flex-shrink: 0; }
 .ma-wrap { font-size: 11px; width: 70px; flex-shrink: 0; font-weight: 700; }
 .no-data { color: #8c959f; font-style: italic; font-size: 12px; padding: 4px 0; }
 
@@ -145,6 +149,19 @@ body {
 .blu { color: #0969da; }
 .gld { color: #9a6700; }
 
+/* ── 圖例列 ── */
+.legend {
+  background: #ffffff; border: 1px solid #d0d7de; border-radius: 8px;
+  padding: 7px 14px; margin-bottom: 8px;
+  font-size: 11px; color: #57606a;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 3px 8px;
+}
+.lg-title { font-weight: 700; color: #1f2328; margin-right: 2px; }
+.lg-grp   { display: flex; align-items: center; gap: 3px; flex-wrap: wrap; }
+.lg-sep   { color: #d0d7de; font-size: 14px; margin: 0 2px; }
+.lg-dot   { font-size: 14px; line-height: 1; }
+.lg-lbl   { white-space: nowrap; }
+
 /* ── Footer ── */
 .footer { text-align: center; color: #8c959f; font-size: 11px; margin-top: 6px; }
 """
@@ -173,14 +190,26 @@ def _stock_rows(stocks: list[dict], ma_data: dict, color: str) -> str:
         else:
             badge = ""
 
+        dual    = s.get("dual", "")
+        dual_cls = f" {dual}" if dual else ""
+
+        chg_pct = info.get("change_pct") if info else None
+        if chg_pct is not None:
+            chg_sign = "+" if chg_pct >= 0 else ""
+            chg_cls  = "pos" if chg_pct >= 0 else "neg"
+            chg_html = f'<span class="chg {chg_cls}">{chg_sign}{chg_pct:.2f}%</span>'
+        else:
+            chg_html = '<span class="chg"></span>'
+
         rows.append(
             f'<div class="srow">'
             f'<span class="rn">{i}.</span>'
-            f'<span class="sname">{_html.escape(s["name"])}'
+            f'<span class="sname{dual_cls}">{_html.escape(s["name"])}'
             f'<span class="scode"> ({s["code"]})</span></span>'
             f'{badge}'
             f'<span class="net {color}">{_fmt_k(s["net_k"])}張</span>'
             f'<span class="price">{price}</span>'
+            f'{chg_html}'
             f'<span class="ma-wrap">{ma}</span>'
             f'</div>'
         )
@@ -353,6 +382,29 @@ def build_report_html(data: dict) -> str:
         f'<div class="hdr-date">{date_display}</div>'
         f'</div>'
         f'{body}'
+        f'<div class="legend">'
+        f'<span class="lg-title">顏色說明</span>'
+        f'<span class="lg-sep">｜</span>'
+        f'<span class="lg-grp">'
+        f'<span class="lg-lbl" style="font-weight:600">個股名稱：</span>'
+        f'<span class="lg-dot" style="color:#e07000">■</span><span class="lg-lbl">外資+投信雙買超</span>'
+        f'<span class="lg-dot" style="color:#0a5c2e">■</span><span class="lg-lbl">外資+投信雙賣超</span>'
+        f'<span class="lg-dot" style="color:#0550ae">■</span><span class="lg-lbl">外資/投信分歧</span>'
+        f'</span>'
+        f'<span class="lg-sep">｜</span>'
+        f'<span class="lg-grp">'
+        f'<span class="lg-lbl" style="font-weight:600">數字：</span>'
+        f'<span class="lg-dot pos">■</span><span class="lg-lbl">漲／買超／均線上</span>'
+        f'<span class="lg-dot neg">■</span><span class="lg-lbl">跌／賣超／均線下</span>'
+        f'</span>'
+        f'<span class="lg-sep">｜</span>'
+        f'<span class="lg-grp">'
+        f'<span class="lg-lbl" style="font-weight:600">標記：</span>'
+        f'<span class="streak-cnt">Nd</span><span class="lg-lbl"> 連續N天上榜</span>'
+        f'<span class="streak-flip pos">昨賣</span><span class="lg-lbl"> 由賣轉買</span>'
+        f'<span class="streak-flip neg">昨買</span><span class="lg-lbl"> 由買轉賣</span>'
+        f'</span>'
+        f'</div>'
         f'<div class="footer">資料來源：TWSE / TPEx  ｜  MA：Yahoo Finance</div>'
         f'</body></html>'
     )

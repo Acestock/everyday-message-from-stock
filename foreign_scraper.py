@@ -13,6 +13,7 @@
 """
 import json
 import logging
+import os
 import threading
 import urllib.request
 from datetime import date, timedelta
@@ -44,6 +45,8 @@ TOP_ACTIVE      = 20   # 外資投信雙買超個股最多顯示筆數
 MAX_STREAK_DAYS = 5    # 連續天數最多追溯幾個前交易日
 TIMEOUT = 12
 
+_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "streak_cache.json")
+
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -57,6 +60,65 @@ _TWSE_COL = {
 }
 # T86 欄位 fallback 索引（若 fields 解析失敗）
 _TWSE_FALLBACK_IDX = {"foreign": 4, "trust": 7}
+
+
+# ── streak 快照持久化 ──────────────────────────────────────────────────────────
+
+def _load_cache_file() -> None:
+    """從 streak_cache.json 載入歷史快照到 _hist_cache（模組載入時執行一次）。"""
+    global _hist_cache
+    try:
+        if not os.path.exists(_CACHE_FILE):
+            return
+        with open(_CACHE_FILE, encoding="utf-8") as f:
+            raw: dict = json.load(f)
+        loaded: dict[str, Optional[dict]] = {}
+        for date_key, snap in raw.items():
+            if snap is None:
+                loaded[date_key] = None
+            else:
+                loaded[date_key] = {
+                    "foreign_buy":  set(snap.get("foreign_buy",  [])),
+                    "foreign_sell": set(snap.get("foreign_sell", [])),
+                    "trust_buy":    set(snap.get("trust_buy",    [])),
+                    "trust_sell":   set(snap.get("trust_sell",   [])),
+                }
+        with _lock:
+            _hist_cache.update(loaded)
+        logger.info("[streak_cache] 載入 %d 天快照", len(loaded))
+    except Exception as e:
+        logger.warning("[streak_cache] 讀取失敗: %s", e)
+
+
+def save_cache_file() -> None:
+    """將 _hist_cache 寫回 streak_cache.json，只保留近 30 天。"""
+    cutoff = date.today() - timedelta(days=30)
+    try:
+        with _lock:
+            raw: dict = {}
+            for date_key, snap in _hist_cache.items():
+                try:
+                    if date.fromisoformat(date_key) < cutoff:
+                        continue
+                except ValueError:
+                    continue
+                if snap is None:
+                    raw[date_key] = None
+                else:
+                    raw[date_key] = {
+                        "foreign_buy":  sorted(snap["foreign_buy"]),
+                        "foreign_sell": sorted(snap["foreign_sell"]),
+                        "trust_buy":    sorted(snap["trust_buy"]),
+                        "trust_sell":   sorted(snap["trust_sell"]),
+                    }
+        with open(_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(raw, f, ensure_ascii=False, indent=2, sort_keys=True)
+        logger.info("[streak_cache] 已儲存 %d 天快照", len(raw))
+    except Exception as e:
+        logger.warning("[streak_cache] 寫入失敗: %s", e)
+
+
+_load_cache_file()
 
 
 # ── 工具函式 ───────────────────────────────────────────────────────────────────
@@ -424,9 +486,10 @@ def fetch_ma_data(
             vol_s = two_vols.get(two_t)
         vol_k = round(float(vol_s.iloc[-1]) / 1000) if vol_s is not None else None
 
-        price  = float(series.iloc[-1])
-        ma20_s = series.rolling(20).mean().dropna()
-        ma20   = float(ma20_s.iloc[-1])
+        price      = float(series.iloc[-1])
+        change_pct = round((series.iloc[-1] - series.iloc[-2]) / series.iloc[-2] * 100, 2) if len(series) >= 2 else None
+        ma20_s     = series.rolling(20).mean().dropna()
+        ma20       = float(ma20_s.iloc[-1])
         ma20_prev  = float(ma20_s.iloc[max(-6, -len(ma20_s))])
 
         if len(series) >= 60:
@@ -440,6 +503,7 @@ def fetch_ma_data(
 
         result[code] = {
             "price":      round(price, 1),
+            "change_pct": change_pct,
             "ma20":       round(ma20,  1),
             "ma20_up":    ma20 >= ma20_prev,
             "above_ma20": price >= ma20,
@@ -659,6 +723,7 @@ def _get_hist_snapshots(data_date: date) -> list[Optional[dict]]:
     """
     prev_days = _prev_weekdays_before(data_date, MAX_STREAK_DAYS)
     result: list[Optional[dict]] = []
+    fetched_new = False
     for d in prev_days:
         key = d.strftime("%Y-%m-%d")
         with _lock:
@@ -668,7 +733,10 @@ def _get_hist_snapshots(data_date: date) -> list[Optional[dict]]:
         snap = _build_snapshot(d)
         with _lock:
             _hist_cache[key] = snap
+        fetched_new = True
         result.append(snap)
+    if fetched_new:
+        save_cache_file()
     return result
 
 
