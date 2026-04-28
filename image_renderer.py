@@ -106,11 +106,14 @@ body {
 .rn    { color: #8c959f; width: 22px; flex-shrink: 0; font-size: 11.5px; }
 .sname { font-weight: 700; color: #1f2328; flex: 1; min-width: 0;
          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sname.dual { color: #e07000; }
+.sname.dual-buy  { color: #e07000; }   /* 外資+投信雙買超 */
+.sname.dual-sell { color: #0a5c2e; }   /* 外資+投信雙賣超 */
+.sname.dual-mixed { color: #0550ae; }  /* 外資/投信一買一賣 */
 .scode { color: #57606a; font-size: 10.5px; font-weight: 400; }
 .net   { font-weight: 700; width: 56px; text-align: right; flex-shrink: 0; font-size: 12.5px; }
-.price { color: #0550ae; font-size: 13.5px; font-weight: 700;
-         width: 58px; text-align: right; flex-shrink: 0; }
+.price { color: #0550ae; font-size: 12.5px; font-weight: 700;
+         width: 52px; text-align: right; flex-shrink: 0; }
+.chg   { font-size: 11.5px; font-weight: 700; width: 46px; text-align: right; flex-shrink: 0; }
 .ma-wrap { font-size: 11px; width: 70px; flex-shrink: 0; font-weight: 700; }
 .no-data { color: #8c959f; font-style: italic; font-size: 12px; padding: 4px 0; }
 
@@ -174,7 +177,17 @@ def _stock_rows(stocks: list[dict], ma_data: dict, color: str) -> str:
         else:
             badge = ""
 
-        dual_cls = " dual" if s.get("dual") else ""
+        dual    = s.get("dual", "")
+        dual_cls = f" {dual}" if dual else ""
+
+        chg_pct = info.get("change_pct") if info else None
+        if chg_pct is not None:
+            chg_sign = "+" if chg_pct >= 0 else ""
+            chg_cls  = "pos" if chg_pct >= 0 else "neg"
+            chg_html = f'<span class="chg {chg_cls}">{chg_sign}{chg_pct:.2f}%</span>'
+        else:
+            chg_html = '<span class="chg"></span>'
+
         rows.append(
             f'<div class="srow">'
             f'<span class="rn">{i}.</span>'
@@ -183,6 +196,7 @@ def _stock_rows(stocks: list[dict], ma_data: dict, color: str) -> str:
             f'{badge}'
             f'<span class="net {color}">{_fmt_k(s["net_k"])}張</span>'
             f'<span class="price">{price}</span>'
+            f'{chg_html}'
             f'<span class="ma-wrap">{ma}</span>'
             f'</div>'
         )

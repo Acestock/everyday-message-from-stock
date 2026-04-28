@@ -82,26 +82,38 @@ def post_image_to_webhook(webhook_url: str, png_bytes: bytes) -> None:
 
 
 def _mark_dual_institutional(foreign_rank: dict, trust_rank: dict) -> None:
-    """在同時出現於外資與投信任一清單的個股上標記 dual=True（顯示橘色名稱）。"""
-    foreign_codes: set[str] = set()
-    trust_codes: set[str] = set()
-    for side in ("buy", "sell"):
-        for market in ("twse", "tpex"):
-            for s in foreign_rank.get(market, {}).get(side, []):
-                foreign_codes.add(s["code"])
-            for s in trust_rank.get(market, {}).get(side, []):
-                trust_codes.add(s["code"])
-    dual = foreign_codes & trust_codes
-    if not dual:
+    """
+    標記同時出現於外資與投信清單的個股，依買賣方向設 dual 類型：
+      dual-buy   外資買超 + 投信買超 → 橘色
+      dual-sell  外資賣超 + 投信賣超 → 深綠色
+      dual-mixed 一個買超一個賣超   → 深藍色
+    """
+    f_buy: set[str] = set()
+    f_sell: set[str] = set()
+    t_buy: set[str] = set()
+    t_sell: set[str] = set()
+    for market in ("twse", "tpex"):
+        for s in foreign_rank.get(market, {}).get("buy",  []): f_buy.add(s["code"])
+        for s in foreign_rank.get(market, {}).get("sell", []): f_sell.add(s["code"])
+        for s in trust_rank.get(market,   {}).get("buy",  []): t_buy.add(s["code"])
+        for s in trust_rank.get(market,   {}).get("sell", []): t_sell.add(s["code"])
+
+    dual_map: dict[str, str] = {}
+    for code in f_buy  & t_buy:  dual_map[code] = "dual-buy"
+    for code in f_sell & t_sell: dual_map[code] = "dual-sell"
+    for code in f_buy  & t_sell: dual_map[code] = "dual-mixed"
+    for code in f_sell & t_buy:  dual_map[code] = "dual-mixed"
+
+    if not dual_map:
         return
     for side in ("buy", "sell"):
         for market in ("twse", "tpex"):
             for s in foreign_rank.get(market, {}).get(side, []):
-                if s["code"] in dual:
-                    s["dual"] = True
+                if s["code"] in dual_map:
+                    s["dual"] = dual_map[s["code"]]
             for s in trust_rank.get(market, {}).get(side, []):
-                if s["code"] in dual:
-                    s["dual"] = True
+                if s["code"] in dual_map:
+                    s["dual"] = dual_map[s["code"]]
 
 
 def main() -> None:

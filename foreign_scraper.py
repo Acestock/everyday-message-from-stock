@@ -486,9 +486,10 @@ def fetch_ma_data(
             vol_s = two_vols.get(two_t)
         vol_k = round(float(vol_s.iloc[-1]) / 1000) if vol_s is not None else None
 
-        price  = float(series.iloc[-1])
-        ma20_s = series.rolling(20).mean().dropna()
-        ma20   = float(ma20_s.iloc[-1])
+        price      = float(series.iloc[-1])
+        change_pct = round((series.iloc[-1] - series.iloc[-2]) / series.iloc[-2] * 100, 2) if len(series) >= 2 else None
+        ma20_s     = series.rolling(20).mean().dropna()
+        ma20       = float(ma20_s.iloc[-1])
         ma20_prev  = float(ma20_s.iloc[max(-6, -len(ma20_s))])
 
         if len(series) >= 60:
@@ -502,6 +503,7 @@ def fetch_ma_data(
 
         result[code] = {
             "price":      round(price, 1),
+            "change_pct": change_pct,
             "ma20":       round(ma20,  1),
             "ma20_up":    ma20 >= ma20_prev,
             "above_ma20": price >= ma20,
