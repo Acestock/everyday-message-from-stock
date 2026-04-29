@@ -27,6 +27,7 @@ from foreign_scraper import (
     fetch_market_overview,
     fetch_sector_institutional,
     fetch_trust_rank,
+    save_cache_file,
 )
 from image_renderer import render_report_png
 
@@ -204,6 +205,12 @@ def main() -> None:
     except Exception as e:
         logger.error("Webhook 發送失敗: %s", e)
         sys.exit(1)
+
+    # 確保大盤層歷史（如外資期貨淨多單）寫回 streak_cache.json
+    try:
+        save_cache_file()
+    except Exception as e:
+        logger.warning("save_cache_file 失敗: %s", e)
 
     if errors:
         logger.warning("完成（部分資料缺失：%s）", "；".join(errors))

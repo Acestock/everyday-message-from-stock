@@ -91,6 +91,27 @@ body {
 .ii-label  { font-size: 10.5px; color: #57606a; }
 .ii-val    { font-size: 13.5px; font-weight: 700; }
 
+/* ── 加權指數 chip 列 (MA / 量比) ── */
+.ov-chips { margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; }
+.ma-chip, .vol-chip {
+  font-size: 11px; font-weight: 700; padding: 2px 7px;
+  border-radius: 10px; background: #f6f8fa; border: 1px solid #d0d7de;
+  color: #57606a;
+}
+.ma-chip.pos { color: #cf222e; background: #ffebe9; border-color: #ffcecb; }
+.ma-chip.neg { color: #1a7f37; background: #dafbe1; border-color: #b7efca; }
+
+/* ── 大盤 macro ribbon ── */
+.macro-ribbon {
+  margin-top: 12px; padding: 8px 12px;
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+  background: #f6f8fa; border-radius: 8px;
+  font-size: 12.5px; border: 1px solid #eaeef2;
+}
+.mr-cell { display: flex; align-items: baseline; gap: 4px; flex-wrap: wrap; }
+.mr-lbl  { color: #57606a; font-weight: 600; margin-right: 4px; }
+.mr-aux  { color: #8c959f; font-size: 11px; margin-left: 6px; }
+
 /* ── 排行榜 ── */
 .rank-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .badge {
@@ -240,9 +261,10 @@ def _rank_block(title: str, rank: dict, ma_data: dict, buy_color: str) -> str:
 
 def _overview_block(ov: dict | None) -> str:
     ov = ov or {}
-    idx   = ov.get("index")
-    insti = ov.get("insti")
-    fut   = ov.get("futures")
+    idx     = ov.get("index")
+    insti   = ov.get("insti")
+    fut     = ov.get("futures")
+    breadth = ov.get("breadth")
 
     if idx:
         chg_c = "pos" if idx["change"] >= 0 else "neg"
@@ -254,6 +276,19 @@ def _overview_block(ov: dict | None) -> str:
             f'{arr} {sign}{idx["change"]:,.2f} ({sign}{idx["change_pct"]:.2f}%)'
             f'</div>'
         )
+        chips: list[str] = []
+        if idx.get("above_ma20") is not None:
+            cls = "pos" if idx["above_ma20"] else "neg"
+            arr = "↑" if idx["above_ma20"] else "↓"
+            chips.append(f'<span class="ma-chip {cls}">{arr}MA20</span>')
+        if idx.get("above_ma60") is not None:
+            cls = "pos" if idx["above_ma60"] else "neg"
+            arr = "↑" if idx["above_ma60"] else "↓"
+            chips.append(f'<span class="ma-chip {cls}">{arr}MA60</span>')
+        if idx.get("vol_ratio") is not None:
+            chips.append(f'<span class="vol-chip">量比 {idx["vol_ratio"]:.2f}x</span>')
+        if chips:
+            idx_h += f'<div class="ov-chips">{"".join(chips)}</div>'
     else:
         idx_h = '<div class="ov-val" style="color:#8c959f">—</div>'
 
@@ -294,6 +329,34 @@ def _overview_block(ov: dict | None) -> str:
     else:
         fut_h = '<div class="ov-val" style="color:#8c959f">—</div>'
 
+    ribbon_cells: list[str] = []
+    if breadth and "up" in breadth and "down" in breadth:
+        lu = breadth.get("limit_up", 0)
+        ld = breadth.get("limit_down", 0)
+        aux = (f'<span class="mr-aux">漲停 {lu} 跌停 {ld}</span>'
+               if (lu or ld) else "")
+        ribbon_cells.append(
+            f'<div class="mr-cell">'
+            f'<span class="mr-lbl">漲跌家數</span>'
+            f'<span class="pos">▲ {breadth["up"]:,}</span>'
+            f'<span style="color:#57606a;margin:0 4px">/</span>'
+            f'<span class="neg">▼ {breadth["down"]:,}</span>'
+            f'{aux}'
+            f'</div>'
+        )
+    if fut and fut.get("delta") is not None:
+        d   = fut["delta"]
+        cls = "pos" if d >= 0 else "neg"
+        sgn = "+" if d >= 0 else ""
+        ribbon_cells.append(
+            f'<div class="mr-cell">'
+            f'<span class="mr-lbl">外資期 Δ vs 昨</span>'
+            f'<span class="{cls}">{sgn}{d:,} 口</span>'
+            f'</div>'
+        )
+    ribbon_html = (f'<div class="macro-ribbon">{"".join(ribbon_cells)}</div>'
+                   if ribbon_cells else "")
+
     return (
         f'<div class="card">'
         f'<div class="card-title">📈 大盤總覽</div>'
@@ -302,6 +365,7 @@ def _overview_block(ov: dict | None) -> str:
         f'<div><div class="ov-label">三大法人合計</div>{ins_h}</div>'
         f'<div><div class="ov-label">外資台指期 淨多單</div>{fut_h}</div>'
         f'</div>'
+        f'{ribbon_html}'
         f'</div>'
     )
 

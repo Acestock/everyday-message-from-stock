@@ -35,6 +35,9 @@ _all_raw_cache_date: Optional[str] = None
 # 歷史快照快取（date_key → snapshot dict）
 _hist_cache: dict[str, Optional[dict]] = {}
 
+# 大盤層歷史快取（date_key → {futures_net: int, ...}），存在 streak_cache.json 的 __market__ key
+_market_hist: dict[str, dict] = {}
+
 # 產業類別 mapping 快取
 _industry_map: dict[str, str] = {}
 _industry_map_date: Optional[str] = None
@@ -65,15 +68,21 @@ _TWSE_FALLBACK_IDX = {"foreign": 4, "trust": 7}
 # ── streak 快照持久化 ──────────────────────────────────────────────────────────
 
 def _load_cache_file() -> None:
-    """從 streak_cache.json 載入歷史快照到 _hist_cache（模組載入時執行一次）。"""
-    global _hist_cache
+    """從 streak_cache.json 載入歷史快照到 _hist_cache（模組載入時執行一次）。
+    `__market__` 是 reserved key，存大盤層歷史（如外資期貨淨多單），載入到 _market_hist。"""
+    global _hist_cache, _market_hist
     try:
         if not os.path.exists(_CACHE_FILE):
             return
         with open(_CACHE_FILE, encoding="utf-8") as f:
             raw: dict = json.load(f)
         loaded: dict[str, Optional[dict]] = {}
+        market: dict[str, dict] = {}
         for date_key, snap in raw.items():
+            if date_key == "__market__":
+                if isinstance(snap, dict):
+                    market.update(snap)
+                continue
             if snap is None:
                 loaded[date_key] = None
             else:
@@ -85,13 +94,14 @@ def _load_cache_file() -> None:
                 }
         with _lock:
             _hist_cache.update(loaded)
-        logger.info("[streak_cache] 載入 %d 天快照", len(loaded))
+            _market_hist.update(market)
+        logger.info("[streak_cache] 載入 %d 天快照, %d 天大盤層", len(loaded), len(market))
     except Exception as e:
         logger.warning("[streak_cache] 讀取失敗: %s", e)
 
 
 def save_cache_file() -> None:
-    """將 _hist_cache 寫回 streak_cache.json，只保留近 30 天。"""
+    """將 _hist_cache 與 _market_hist 寫回 streak_cache.json，只保留近 30 天。"""
     cutoff = date.today() - timedelta(days=30)
     try:
         with _lock:
@@ -111,9 +121,20 @@ def save_cache_file() -> None:
                         "trust_buy":    sorted(snap["trust_buy"]),
                         "trust_sell":   sorted(snap["trust_sell"]),
                     }
+            market_pruned: dict[str, dict] = {}
+            for k, v in _market_hist.items():
+                try:
+                    if date.fromisoformat(k) < cutoff:
+                        continue
+                except ValueError:
+                    continue
+                market_pruned[k] = v
+            if market_pruned:
+                raw["__market__"] = market_pruned
         with open(_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(raw, f, ensure_ascii=False, indent=2, sort_keys=True)
-        logger.info("[streak_cache] 已儲存 %d 天快照", len(raw))
+        logger.info("[streak_cache] 已儲存 %d 天快照, %d 天大盤層",
+                    sum(1 for k in raw if k != "__market__"), len(market_pruned))
     except Exception as e:
         logger.warning("[streak_cache] 寫入失敗: %s", e)
 
@@ -892,17 +913,32 @@ def fetch_sector_institutional() -> dict:
 # ── 大盤總覽 ──────────────────────────────────────────────────────────────────
 
 def _fetch_taiex_index() -> dict | None:
-    """加權指數收盤、漲跌、漲跌幅。"""
+    """加權指數收盤、漲跌、漲跌幅；附 MA20/60 位置 + 大盤量比。"""
     # Method 1: yfinance Ticker.history()（單支更穩定，避免 MultiIndex 問題）
     try:
-        hist = yf.Ticker("^TWII").history(period="5d")
+        hist = yf.Ticker("^TWII").history(period="6mo")
         if hist is not None and not hist.empty:
             c = hist["Close"].dropna()
             if len(c) >= 2:
                 close, prev = float(c.iloc[-1]), float(c.iloc[-2])
                 chg = close - prev
-                return {"close": round(close, 2), "change": round(chg, 2),
-                        "change_pct": round(chg / prev * 100, 2)}
+                ma20 = float(c.tail(20).mean()) if len(c) >= 20 else None
+                ma60 = float(c.tail(60).mean()) if len(c) >= 60 else None
+                vol = hist.get("Volume")
+                vol_ratio = None
+                if vol is not None:
+                    v = vol.dropna()
+                    if len(v) >= 21:
+                        avg20 = float(v.iloc[-21:-1].mean())
+                        if avg20 > 0:
+                            vol_ratio = round(float(v.iloc[-1]) / avg20, 2)
+                return {
+                    "close": round(close, 2), "change": round(chg, 2),
+                    "change_pct": round(chg / prev * 100, 2),
+                    "above_ma20": (close >= ma20) if ma20 is not None else None,
+                    "above_ma60": (close >= ma60) if ma60 is not None else None,
+                    "vol_ratio": vol_ratio,
+                }
     except Exception as e:
         logger.debug("[taiex] yfinance Ticker 失敗: %s", e)
 
@@ -949,6 +985,66 @@ def _fetch_taiex_index() -> dict | None:
         logger.warning("[taiex] MI_INDEX 失敗: %s", e)
 
     return None
+
+
+def _fetch_market_breadth() -> dict | None:
+    """
+    上市市場漲跌家數（含漲停 / 跌停）。
+    來源：TWSE MI_INDEX type=MS（市場成交資訊摘要）
+    回傳：{up, down, limit_up, limit_down, unchanged}，全 int；失敗或非交易日 → None。
+    """
+    try:
+        url = (
+            "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
+            f"?response=json&date={date.today().strftime('%Y%m%d')}&type=MS"
+        )
+        j = _get_json(url)
+        if j.get("stat") != "OK":
+            logger.info("[breadth] MI_INDEX stat=%s", j.get("stat"))
+            return None
+
+        # 巡訪所有 list 欄位找含「漲」「跌」「平」的 row
+        result: dict[str, int] = {}
+        for v in j.values():
+            if not isinstance(v, list):
+                continue
+            for row in v:
+                if not isinstance(row, list) or len(row) < 2:
+                    continue
+                label = str(row[0]).strip()
+                # 取右側第一個能解析為整數的欄位
+                num: int | None = None
+                for cell in row[1:]:
+                    s = str(cell).replace(",", "").strip()
+                    if s.isdigit():
+                        num = int(s)
+                        break
+                if num is None:
+                    continue
+                # 嚴格 startswith 避免誤吃「不含」「漲跌幅度」之類混合行
+                if "漲停" in label and "up" not in result:
+                    result["limit_up"] = num
+                elif "跌停" in label and "limit_down" not in result:
+                    result["limit_down"] = num
+                elif label.startswith("上漲") and "up" not in result:
+                    result["up"] = num
+                elif label.startswith("下跌") and "down" not in result:
+                    result["down"] = num
+                elif label.startswith("平盤") and "unchanged" not in result:
+                    result["unchanged"] = num
+
+        if "up" in result and "down" in result:
+            result.setdefault("limit_up", 0)
+            result.setdefault("limit_down", 0)
+            logger.info("[breadth] 上漲 %d / 下跌 %d / 漲停 %d / 跌停 %d",
+                        result["up"], result["down"],
+                        result["limit_up"], result["limit_down"])
+            return result
+        logger.info("[breadth] 解析失敗 result=%s", result)
+        return None
+    except Exception as e:
+        logger.warning("[breadth] 失敗: %s", e)
+        return None
 
 
 def _fetch_bfi82u() -> dict | None:
@@ -1240,10 +1336,22 @@ def fetch_market_overview() -> dict:
         else:
             insti = None
 
+    fut = _fetch_futures_position()
+    if fut and fut.get("net") is not None:
+        today_key = date.today().isoformat()
+        with _lock:
+            prev_keys = sorted(k for k in _market_hist if k < today_key)
+            if prev_keys:
+                prev_net = _market_hist[prev_keys[-1]].get("futures_net")
+                if prev_net is not None:
+                    fut["delta"] = fut["net"] - prev_net
+            _market_hist.setdefault(today_key, {})["futures_net"] = fut["net"]
+
     return {
         "index":   _fetch_taiex_index(),
         "insti":   insti,
-        "futures": _fetch_futures_position(),
+        "futures": fut,
+        "breadth": _fetch_market_breadth(),
     }
 
 
