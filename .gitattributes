@@ -1,0 +1,4 @@
+# streak_cache.json 是 runtime 產生的快照快取，每次執行後自動 commit 回 repo。
+# 兩個分支各自累積不同日期的資料，merge 時必然衝突。
+# 使用 union 策略：保留兩邊所有內容取聯集，不強制選邊。
+streak_cache.json merge=union
