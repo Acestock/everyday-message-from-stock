@@ -94,7 +94,7 @@ body {
 }
 
 /* ── 大盤總覽 ── */
-.ov-grid  { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+.ov-grid  { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 12px; }
 .ov-label { font-size: 11px; color: #57606a; font-weight: 600;
             text-transform: uppercase; letter-spacing: .4px; margin-bottom: 4px; }
 .ov-val   { font-size: 22px; font-weight: 700; }
@@ -325,6 +325,20 @@ def _overview_block(ov: dict | None) -> str:
     else:
         ins_h = '<div class="ov-val" style="color:#8c959f">—</div>'
 
+    if breadth and "up" in breadth and "down" in breadth:
+        lu = breadth.get("limit_up", 0)
+        ld = breadth.get("limit_down", 0)
+        brd_h = (
+            f'<div class="ov-val" style="font-size:18px">'
+            f'<span class="pos">▲ {breadth["up"]:,}</span>'
+            f'<span style="color:#8c959f;font-size:14px;margin:0 4px">/</span>'
+            f'<span class="neg">▼ {breadth["down"]:,}</span>'
+            f'</div>'
+            f'<div class="ov-sub" style="color:#57606a">漲停 {lu} ／ 跌停 {ld}</div>'
+        )
+    else:
+        brd_h = '<div class="ov-val" style="color:#8c959f">—</div>'
+
     if fut:
         net  = fut["net"]
         fc   = "blu" if net >= 0 else "neg"
@@ -335,40 +349,19 @@ def _overview_block(ov: dict | None) -> str:
             if (lo or so) else
             f'淨多單 {sign}{net:,}'
         )
+        delta_h = ""
+        if fut.get("delta") is not None:
+            d   = fut["delta"]
+            dc  = "pos" if d >= 0 else "neg"
+            ds  = "+" if d >= 0 else ""
+            delta_h = f'<div class="ov-sub {dc}">Δ vs 昨 {ds}{d:,} 口</div>'
         fut_h = (
             f'<div class="ov-val {fc}">{sign}{net:,}口</div>'
             f'<div class="ov-sub" style="color:#57606a">{sub}</div>'
+            f'{delta_h}'
         )
     else:
         fut_h = '<div class="ov-val" style="color:#8c959f">—</div>'
-
-    ribbon_cells: list[str] = []
-    if breadth and "up" in breadth and "down" in breadth:
-        lu = breadth.get("limit_up", 0)
-        ld = breadth.get("limit_down", 0)
-        aux = (f'<span class="mr-aux">漲停 {lu} 跌停 {ld}</span>'
-               if (lu or ld) else "")
-        ribbon_cells.append(
-            f'<div class="mr-cell">'
-            f'<span class="mr-lbl">漲跌家數</span>'
-            f'<span class="pos">▲ {breadth["up"]:,}</span>'
-            f'<span style="color:#57606a;margin:0 4px">/</span>'
-            f'<span class="neg">▼ {breadth["down"]:,}</span>'
-            f'{aux}'
-            f'</div>'
-        )
-    if fut and fut.get("delta") is not None:
-        d   = fut["delta"]
-        cls = "pos" if d >= 0 else "neg"
-        sgn = "+" if d >= 0 else ""
-        ribbon_cells.append(
-            f'<div class="mr-cell">'
-            f'<span class="mr-lbl">外資期 Δ vs 昨</span>'
-            f'<span class="{cls}">{sgn}{d:,} 口</span>'
-            f'</div>'
-        )
-    ribbon_html = (f'<div class="macro-ribbon">{"".join(ribbon_cells)}</div>'
-                   if ribbon_cells else "")
 
     return (
         f'<div class="card">'
@@ -376,9 +369,9 @@ def _overview_block(ov: dict | None) -> str:
         f'<div class="ov-grid">'
         f'<div><div class="ov-label">加權指數</div>{idx_h}</div>'
         f'<div><div class="ov-label">三大法人合計</div>{ins_h}</div>'
+        f'<div><div class="ov-label">漲跌家數</div>{brd_h}</div>'
         f'<div><div class="ov-label">外資台指期 淨多單</div>{fut_h}</div>'
         f'</div>'
-        f'{ribbon_html}'
         f'</div>'
     )
 
