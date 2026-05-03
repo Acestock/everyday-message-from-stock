@@ -80,6 +80,7 @@ body {
   font-size: 14px; font-weight: 700; color: #0969da;
   padding-bottom: 8px; margin-bottom: 8px;
   border-bottom: 1px solid #eaeef2;
+  position: relative; z-index: 1;
 }
 
 /* ── 浮水印 ── */
@@ -124,7 +125,7 @@ body {
 .mr-aux  { color: #8c959f; font-size: 11px; margin-left: 6px; }
 
 /* ── 排行榜 ── */
-.rank-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.rank-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; position: relative; z-index: 1; }
 .badge {
   display: inline-block; font-size: 11px; color: #57606a;
   background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 4px;
