@@ -74,11 +74,22 @@ body {
   background: #ffffff; border: 1px solid #d0d7de;
   border-radius: 8px; padding: 12px 14px; margin-bottom: 10px;
   box-shadow: 0 1px 3px rgba(0,0,0,.04);
+  position: relative; overflow: hidden;
 }
 .card-title {
   font-size: 14px; font-weight: 700; color: #0969da;
   padding-bottom: 8px; margin-bottom: 8px;
   border-bottom: 1px solid #eaeef2;
+}
+
+/* ── 浮水印 ── */
+.watermark {
+  position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%) rotate(-25deg);
+  font-size: 56px; font-weight: 900; letter-spacing: 6px;
+  color: rgba(160, 160, 160, 0.13);
+  white-space: nowrap; pointer-events: none;
+  user-select: none; z-index: 0;
 }
 
 /* ── 大盤總覽 ── */
@@ -240,6 +251,7 @@ def _stock_rows(stocks: list[dict], ma_data: dict, color: str) -> str:
 def _rank_block(title: str, rank: dict, ma_data: dict, buy_color: str) -> str:
     return (
         f'<div class="card">'
+        f'<div class="watermark">艾斯DC討論區</div>'
         f'<div class="card-title">{title}</div>'
         f'<div class="rank-grid">'
         f'<div>'
