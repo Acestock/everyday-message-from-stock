@@ -1,9 +1,9 @@
 name: Daily Stock Report
 
 on:
-  # 每週一至五 18:00 台灣時間（= UTC 10:00）自動執行
+  # 每週一至五 18:00 台灣時間（= UTC 09:50），避開整點擁塞
   schedule:
-    - cron: '0 10 * * 1-5'
+    - cron: '50 9 * * 1-5'
 
   # 手動觸發（可在 GitHub Actions 頁面按 "Run workflow"）
   workflow_dispatch:
