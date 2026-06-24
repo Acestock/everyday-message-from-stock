@@ -1,0 +1,15 @@
+name: Keepalive
+
+on:
+  schedule:
+    # 每週三 UTC 06:00 執行一次，維持 repo 活躍度讓 GitHub 排程不被降級
+    - cron: '0 6 * * 3'
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - uses: gautamkrishnar/keepalive-workflow@v2
