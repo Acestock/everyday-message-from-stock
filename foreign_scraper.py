@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import threading
+import urllib.error
 import urllib.request
 from datetime import date, timedelta
 from typing import Optional
@@ -46,7 +47,9 @@ TOP_N           = 10
 TOP_SECTOR      = 10   # 族群買超/賣超顯示前 N 個產業
 TOP_ACTIVE      = 20   # 外資投信雙買超個股最多顯示筆數
 MAX_STREAK_DAYS = 5    # 連續天數最多追溯幾個前交易日
-TIMEOUT = 12
+TIMEOUT = 25
+_RETRY_MAX = 2      # 額外重試次數（不含首次）
+_RETRY_BACKOFF = (2, 5)   # 每次重試前 sleep 秒數
 
 _CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "streak_cache.json")
 
@@ -145,16 +148,37 @@ _load_cache_file()
 # ── 工具函式 ───────────────────────────────────────────────────────────────────
 
 def _get_json(url: str, referer: str = "") -> dict:
+    """發 GET 拿 JSON。TWSE 主站在 CI 環境常 timeout，內建 retry 增加穩定度。
+    Timeout / JSON decode error / URLError 都會重試；HTTP 4xx 直接拋不重試。"""
+    import time as _time
     headers = {
         "User-Agent": _UA,
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "X-Requested-With": "XMLHttpRequest",
     }
+    # TWSE 主站部分節點會擋沒 Referer 的機器人流量
+    if not referer and "www.twse.com.tw" in url:
+        referer = "https://www.twse.com.tw/zh/"
     if referer:
         headers["Referer"] = referer
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+
+    last_err: Exception | None = None
+    for attempt in range(_RETRY_MAX + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            # 4xx 是永久性錯誤，重試無用
+            if 400 <= e.code < 500:
+                raise
+            last_err = e
+        except (urllib.error.URLError, json.JSONDecodeError, TimeoutError, OSError) as e:
+            last_err = e
+        if attempt < _RETRY_MAX:
+            _time.sleep(_RETRY_BACKOFF[attempt])
+    assert last_err is not None
+    raise last_err
 
 
 def _clean_num(s) -> float:
@@ -310,7 +334,9 @@ def _fetch_twse_t86_both() -> tuple[list[dict], list[dict], str]:
 # ── TPEx 三大法人（外資 + 投信 共用）─────────────────────────────────────────
 
 def _get_json_tpex(url: str, referer: str = "") -> dict:
-    """TPEx 專用 HTTP GET，額外帶 Accept-Language 與 Accept 標頭以繞過部分防護。"""
+    """TPEx 專用 HTTP GET，額外帶 Accept-Language 與 Accept 標頭以繞過部分防護。
+    Timeout / DNS 錯誤會自動重試（與 _get_json 相同策略）。"""
+    import time as _time
     headers = {
         "User-Agent":      _UA,
         "Accept":          "application/json, text/javascript, */*; q=0.01",
@@ -320,8 +346,22 @@ def _get_json_tpex(url: str, referer: str = "") -> dict:
     if referer:
         headers["Referer"] = referer
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+
+    last_err: Exception | None = None
+    for attempt in range(_RETRY_MAX + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if 400 <= e.code < 500:
+                raise
+            last_err = e
+        except (urllib.error.URLError, json.JSONDecodeError, TimeoutError, OSError) as e:
+            last_err = e
+        if attempt < _RETRY_MAX:
+            _time.sleep(_RETRY_BACKOFF[attempt])
+    assert last_err is not None
+    raise last_err
 
 
 def _fetch_tpex_3insti() -> tuple[list[dict], list[dict], str]:
