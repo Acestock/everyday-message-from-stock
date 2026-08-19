@@ -43,6 +43,14 @@ _market_hist: dict[str, dict] = {}
 _industry_map: dict[str, str] = {}
 _industry_map_date: Optional[str] = None
 
+# FinMind API 相關
+FINMIND_URL    = "https://api.finmindtrade.com/api/v4/data"
+FINMIND_TOKEN  = os.getenv("FINMIND_TOKEN", "").strip()
+FINMIND_TIMEOUT = 15   # 短 timeout，失敗直接切 TWSE fallback
+_finmind_stock_market: dict[str, str] = {}   # {stock_id → "上市"/"上櫃"}
+_finmind_stock_names:  dict[str, str] = {}   # {stock_id → 中文名}
+_finmind_stock_info_date: Optional[str] = None
+
 TOP_N           = 10
 TOP_SECTOR      = 10   # 族群買超/賣超顯示前 N 個產業
 TOP_ACTIVE      = 20   # 外資投信雙買超個股最多顯示筆數
@@ -179,6 +187,244 @@ def _get_json(url: str, referer: str = "") -> dict:
             _time.sleep(_RETRY_BACKOFF[attempt])
     assert last_err is not None
     raise last_err
+
+
+# ── FinMind API（優先來源，比 TWSE 官方 API 穩）─────────────────────────────
+
+def _finmind_get(dataset: str, **params) -> Optional[list]:
+    """
+    呼叫 FinMind API，成功回 data list、失敗回 None。
+    短 timeout、不 retry — 讓 caller 快速決定要不要走 TWSE fallback。
+    """
+    if not FINMIND_TOKEN:
+        return None
+    import urllib.parse
+    try:
+        qs = urllib.parse.urlencode(
+            {"dataset": dataset, "token": FINMIND_TOKEN, **params}
+        )
+        req = urllib.request.Request(
+            f"{FINMIND_URL}?{qs}",
+            headers={"User-Agent": _UA, "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=FINMIND_TIMEOUT) as resp:
+            j = json.loads(resp.read().decode("utf-8"))
+        if j.get("status") == 200:
+            return j.get("data") or []
+        logger.info("[finmind] %s status=%s msg=%s",
+                    dataset, j.get("status"), j.get("msg"))
+    except Exception as e:
+        logger.info("[finmind] %s 失敗: %s", dataset, e)
+    return None
+
+
+def _finmind_load_stock_info() -> None:
+    """
+    每日快取 stock_id → 市場（上市/上櫃）與中文名的 mapping。
+    FinMind 個股買賣超 dataset 不含市場欄位，需靠 TaiwanStockInfo 分類。
+    """
+    global _finmind_stock_market, _finmind_stock_names, _finmind_stock_info_date
+    today = date.today().isoformat()
+    with _lock:
+        if _finmind_stock_info_date == today and _finmind_stock_market:
+            return
+
+    data = _finmind_get("TaiwanStockInfo")
+    if not data:
+        return
+
+    market_map: dict[str, str] = {}
+    name_map:   dict[str, str] = {}
+    for item in data:
+        sid = str(item.get("stock_id", "")).strip()
+        typ = str(item.get("type", "")).lower()
+        if not sid:
+            continue
+        if typ == "twse":
+            market_map[sid] = "上市"
+        elif typ in ("tpex", "otc"):
+            market_map[sid] = "上櫃"
+        else:
+            continue
+        name = str(item.get("stock_name", "")).strip()
+        if name:
+            name_map[sid] = name
+
+    with _lock:
+        _finmind_stock_market    = market_map
+        _finmind_stock_names     = name_map
+        _finmind_stock_info_date = today
+    logger.info("[finmind] StockInfo 已快取 %d 支", len(market_map))
+
+
+def _finmind_is_foreign(category: str) -> bool:
+    """判斷 FinMind 法人類別欄位是否屬於「外資」（含外資自營商）。"""
+    return category in ("Foreign_Investor", "Foreign_Dealer_Self",
+                        "外資", "外資自營商") or "外資" in category
+
+
+def _finmind_is_trust(category: str) -> bool:
+    return category in ("Investment_Trust", "投信") or "投信" in category
+
+
+def _finmind_is_dealer(category: str) -> bool:
+    """自營商（含自營+避險兩桌，不含外資自營）"""
+    if _finmind_is_foreign(category):
+        return False
+    return category in ("Dealer_self", "Dealer_Hedging",
+                        "自營商", "自營商_自營", "自營商_避險") or "自營商" in category
+
+
+def _finmind_fetch_all_raw(target_date: date) -> Optional[dict]:
+    """
+    FinMind 版 _fetch_all_raw：一次拿到指定日期全部上市+上櫃個股的外資、投信買賣超。
+    回傳格式與 _fetch_all_raw() 完全相同，供上層無縫替換：
+      {date, twse_foreign, twse_trust, tpex_foreign, tpex_trust}
+    Token 未設 / API 失敗 / 該日無資料 → None
+    """
+    if not FINMIND_TOKEN:
+        return None
+
+    _finmind_load_stock_info()
+    if not _finmind_stock_market:
+        return None
+
+    dstr = target_date.isoformat()
+    data = _finmind_get(
+        "TaiwanStockInstitutionalInvestorsBuySell",
+        start_date=dstr, end_date=dstr,
+    )
+    if not data:
+        return None
+
+    # 每支股票聚合外資 / 投信 net_shares（買 - 賣）
+    per_stock: dict[str, dict[str, int]] = {}
+    for row in data:
+        sid = str(row.get("stock_id", "")).strip()
+        if not sid:
+            continue
+        cat  = str(row.get("name", "")).strip()
+        try:
+            net = int(row.get("buy") or 0) - int(row.get("sell") or 0)
+        except (ValueError, TypeError):
+            continue
+        d = per_stock.setdefault(sid, {"foreign": 0, "trust": 0})
+        if _finmind_is_foreign(cat):
+            d["foreign"] += net
+        elif _finmind_is_trust(cat):
+            d["trust"] += net
+
+    twse_f: list[dict] = []
+    twse_t: list[dict] = []
+    tpex_f: list[dict] = []
+    tpex_t: list[dict] = []
+    for sid, vals in per_stock.items():
+        market = _finmind_stock_market.get(sid)
+        if not market:
+            continue
+        name = _finmind_stock_names.get(sid, sid)
+        f_k = round(vals["foreign"] / 1000)
+        t_k = round(vals["trust"]   / 1000)
+        if f_k != 0:
+            entry = {"code": sid, "name": name, "net_k": f_k, "market": market}
+            (twse_f if market == "上市" else tpex_f).append(entry)
+        if t_k != 0:
+            entry = {"code": sid, "name": name, "net_k": t_k, "market": market}
+            (twse_t if market == "上市" else tpex_t).append(entry)
+
+    # 用 FinMind 實際回傳的日期而非請求日期（非交易日會 fallback 到最近）
+    actual_dates = sorted({str(r.get("date", "")) for r in data if r.get("date")})
+    date_iso = actual_dates[-1] if actual_dates else dstr
+    date_display = date_iso.replace("-", "/")
+
+    logger.info(
+        "[finmind] individual %s: 上市(外=%d 信=%d) 上櫃(外=%d 信=%d)",
+        date_display, len(twse_f), len(twse_t), len(tpex_f), len(tpex_t),
+    )
+    return {
+        "date":         date_display,
+        "twse_foreign": twse_f,
+        "twse_trust":   twse_t,
+        "tpex_foreign": tpex_f,
+        "tpex_trust":   tpex_t,
+    }
+
+
+def _finmind_fetch_insti_total(target_date: date) -> Optional[dict]:
+    """
+    FinMind 版三大法人合計（上市+上櫃合併，億元）。
+    回傳格式與 _fetch_bfi82u() 相同：{foreign, trust, dealer, total}
+    """
+    if not FINMIND_TOKEN:
+        return None
+    dstr = target_date.isoformat()
+    data = _finmind_get(
+        "TaiwanStockTotalInstitutionalInvestors",
+        start_date=dstr, end_date=dstr,
+    )
+    if not data:
+        return None
+
+    foreign_sum = trust_sum = dealer_sum = 0.0
+    for row in data:
+        cat = str(row.get("name", "")).strip()
+        try:
+            net = float(row.get("buy") or 0) - float(row.get("sell") or 0)
+        except (ValueError, TypeError):
+            continue
+        if _finmind_is_foreign(cat):
+            foreign_sum += net
+        elif _finmind_is_trust(cat):
+            trust_sum += net
+        elif _finmind_is_dealer(cat):
+            dealer_sum += net
+
+    if not (foreign_sum or trust_sum or dealer_sum):
+        return None
+    result = {
+        "foreign": round(foreign_sum / 1e8, 1),
+        "trust":   round(trust_sum   / 1e8, 1),
+        "dealer":  round(dealer_sum  / 1e8, 1),
+    }
+    result["total"] = round(sum(result.values()), 1)
+    logger.info("[finmind] insti_total 外資=%.1f 投信=%.1f 自營=%.1f 合計=%.1f",
+                result["foreign"], result["trust"],
+                result["dealer"], result["total"])
+    return result
+
+
+def _finmind_fetch_futures(target_date: date) -> Optional[dict]:
+    """
+    FinMind 版外資台指期未平倉。
+    回傳 {long_oi, short_oi, net} 或 None
+    """
+    if not FINMIND_TOKEN:
+        return None
+    dstr = target_date.isoformat()
+    data = _finmind_get(
+        "TaiwanFuturesInstitutionalInvestors",
+        data_id="TX", start_date=dstr, end_date=dstr,
+    )
+    if not data:
+        return None
+
+    lo = so = 0
+    for row in data:
+        inv = str(row.get("institutional_investors", "")
+                  or row.get("name", "")).strip()
+        if "外資" not in inv and "Foreign" not in inv:
+            continue
+        try:
+            lo += int(row.get("long_open_interest_balance_volume") or
+                      row.get("long_open_interest") or 0)
+            so += int(row.get("short_open_interest_balance_volume") or
+                      row.get("short_open_interest") or 0)
+        except (ValueError, TypeError):
+            continue
+    if lo or so:
+        logger.info("[finmind] futures 多=%d 空=%d 淨=%d", lo, so, lo - so)
+        return {"long_oi": lo, "short_oi": so, "net": lo - so}
+    return None
 
 
 def _clean_num(s) -> float:
@@ -457,6 +703,18 @@ def _fetch_all_raw() -> dict:
         if _all_raw_cache_date == today and _all_raw_cache:
             return _all_raw_cache
 
+    # ── FinMind 優先（含 token 時才試）────────────────────────────────────────
+    fm = _finmind_fetch_all_raw(date.today())
+    if fm and (fm["twse_foreign"] or fm["twse_trust"]
+               or fm["tpex_foreign"] or fm["tpex_trust"]):
+        with _lock:
+            _all_raw_cache      = fm
+            _all_raw_cache_date = today
+        return fm
+
+    # ── Fallback: 原本的 TWSE T86 + TPEx ────────────────────────────────────
+    if FINMIND_TOKEN:
+        logger.info("[all_raw] FinMind 無資料/失敗，改走 TWSE/TPEx")
     twse_f, twse_t, twse_date = _fetch_twse_t86_both()
     tpex_f, tpex_t, tpex_d   = _fetch_tpex_3insti()
     # 只在 TPEx 有實際資料時才採用其日期，避免空回應裡的預設舊日期污染顯示
@@ -761,8 +1019,17 @@ def _build_snapshot(dt: date) -> Optional[dict]:
                              key=lambda x: x["net_k"])[:TOP_N]}
         return buy_codes, sell_codes
 
-    twse_f, twse_t = _fetch_twse_t86_for_date(dt)
-    tpex_f, tpex_t = _fetch_tpex_for_date(dt)
+    # FinMind 優先（一次呼叫同時拿上市+上櫃，比分別呼叫 TWSE/TPEx 快很多）
+    fm = _finmind_fetch_all_raw(dt)
+    if fm and (fm["twse_foreign"] or fm["twse_trust"]
+               or fm["tpex_foreign"] or fm["tpex_trust"]):
+        twse_f = fm["twse_foreign"]
+        twse_t = fm["twse_trust"]
+        tpex_f = fm["tpex_foreign"]
+        tpex_t = fm["tpex_trust"]
+    else:
+        twse_f, twse_t = _fetch_twse_t86_for_date(dt)
+        tpex_f, tpex_t = _fetch_tpex_for_date(dt)
 
     if not (twse_f or twse_t or tpex_f or tpex_t):
         logger.info("[snapshot] %s 無資料（非交易日）", dt)
@@ -1365,24 +1632,27 @@ def fetch_market_overview() -> dict:
     大盤總覽：加權指數 + 三大法人合計（上市＋上櫃，億元）+ 外資期貨淨多單。
     任何子項目失敗不影響其他項目，回傳 None 表示該項目無資料。
     """
-    insti_twse = _fetch_bfi82u()
-    insti_tpex = _fetch_tpex_institutional()
+    # ── 三大法人合計：FinMind 優先（已含上市+上櫃）── fallback: BFI82U + TPEx
+    insti: dict | None = _finmind_fetch_insti_total(date.today())
+    if not insti:
+        insti_twse = _fetch_bfi82u()
+        insti_tpex = _fetch_tpex_institutional()
+        if insti_twse or insti_tpex:
+            insti = {}
+            for key in ("foreign", "trust", "dealer"):
+                t = (insti_twse or {}).get(key)
+                p = (insti_tpex or {}).get(key)
+                if t is not None or p is not None:
+                    insti[key] = round((t or 0.0) + (p or 0.0), 1)
+            if insti:
+                insti["total"] = round(sum(insti.values()), 1)
+            else:
+                insti = None
 
-    # 合併上市 + 上櫃，任一有資料即顯示（另一方缺資料視為 0）
-    insti: dict | None = None
-    if insti_twse or insti_tpex:
-        insti = {}
-        for key in ("foreign", "trust", "dealer"):
-            t = (insti_twse or {}).get(key)
-            p = (insti_tpex or {}).get(key)
-            if t is not None or p is not None:
-                insti[key] = round((t or 0.0) + (p or 0.0), 1)
-        if insti:
-            insti["total"] = round(sum(insti.values()), 1)
-        else:
-            insti = None
-
-    fut = _fetch_futures_position()
+    # ── 外資期貨：FinMind 優先 ── fallback: TAIFEX Open API / HTML
+    fut = _finmind_fetch_futures(date.today())
+    if not fut:
+        fut = _fetch_futures_position()
     if fut and fut.get("net") is not None:
         today_key = date.today().isoformat()
         with _lock:

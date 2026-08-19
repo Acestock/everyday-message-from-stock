@@ -38,6 +38,7 @@ jobs:
       - name: Send stock report
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          FINMIND_TOKEN:       ${{ secrets.FINMIND_TOKEN }}
         run: python send_report.py
 
       - name: Commit streak cache
