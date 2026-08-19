@@ -47,7 +47,7 @@ TOP_N           = 10
 TOP_SECTOR      = 10   # 族群買超/賣超顯示前 N 個產業
 TOP_ACTIVE      = 20   # 外資投信雙買超個股最多顯示筆數
 MAX_STREAK_DAYS = 5    # 連續天數最多追溯幾個前交易日
-TIMEOUT = 25
+TIMEOUT = 45        # 收盤後 1~3 小時是 TWSE 處理資料尖峰，回應會很慢
 _RETRY_MAX = 2      # 額外重試次數（不含首次）
 _RETRY_BACKOFF = (2, 5)   # 每次重試前 sleep 秒數
 
