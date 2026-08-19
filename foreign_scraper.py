@@ -271,10 +271,14 @@ def _fetch_twse_t86_both() -> tuple[list[dict], list[dict], str]:
     一次 HTTP 請求同時解析外資與投信，避免兩次分開請求被 CDN 分流到
     不同快取節點而拿到不一致的日期 / 資料。
     回傳 (foreign_list, trust_list, date_str)。
+
+    使用舊端點 /fund/T86：/rwd/zh/fund/T86 在 CI 被 CDN 完全阻擋（每次 timeout），
+    /fund/T86 仍可用（歷史快照多天成功可驗證）。舊端點 date= 空會 400，
+    故明確傳今日 YYYYMMDD；若非交易日 stat != OK 會回空列表。
     """
     url = (
-        "https://www.twse.com.tw/rwd/zh/fund/T86"
-        "?response=json&date=&selectType=ALLBUT0999"
+        "https://www.twse.com.tw/fund/T86"
+        f"?response=json&date={date.today().strftime('%Y%m%d')}&selectType=ALLBUT0999"
     )
     try:
         j    = _get_json(url)
@@ -581,7 +585,7 @@ def fetch_ma_data(
 # ── ETF 判斷 ─────────────────────────────────────────────────────────────────
 
 def _is_etf(code: str) -> bool:
-    """台股 ETF 代號均以 '0' 開頭；普通股從 1xxx 起，不會以 0 開頭。"""
+    """台股 ETF 代號均以 '0' 開頭；普通股從 1xxx 起,不會以 0 開頭。"""
     return code.startswith("0")
 
 
@@ -998,9 +1002,10 @@ def _fetch_taiex_index() -> dict | None:
         logger.debug("[taiex] yfinance download 失敗: %s", e)
 
     # Method 3: TWSE MI_INDEX API（遍歷所有 data 欄位，不依賴固定 key）
+    # 使用舊端點 /exchangeReport/MI_INDEX，/rwd/zh/afterTrading/MI_INDEX 已被 CDN 阻擋
     try:
         j = _get_json(
-            "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
+            "https://www.twse.com.tw/exchangeReport/MI_INDEX"
             f"?response=json&date={date.today().strftime('%Y%m%d')}&type=IND"
         )
         if j.get("stat") == "OK":
@@ -1034,8 +1039,9 @@ def _fetch_market_breadth() -> dict | None:
     回傳：{up, down, limit_up, limit_down, unchanged}，全 int；失敗或非交易日 → None。
     """
     try:
+        # 舊端點 /exchangeReport/MI_INDEX 較穩，/rwd/zh/afterTrading/MI_INDEX 已被 CDN 阻擋
         url = (
-            "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
+            "https://www.twse.com.tw/exchangeReport/MI_INDEX"
             f"?response=json&date={date.today().strftime('%Y%m%d')}&type=MS"
         )
         j = _get_json(url)
